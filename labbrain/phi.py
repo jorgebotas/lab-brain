@@ -88,9 +88,14 @@ def line_hash(line: str) -> str:
 def load_denylist(root: Path | None, rel_path: str) -> re.Pattern[str] | None:
     if root is None or not (root / rel_path).is_file():
         return None
+    try:
+        text = (root / rel_path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        # `from None`: a UnicodeDecodeError carries the raw bytes, i.e. the names.
+        raise ConfigError("phi denylist file cannot be read") from None
     names = [
         line.strip()
-        for line in (root / rel_path).read_text(encoding="utf-8").splitlines()
+        for line in text.splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     ]
     if not names:
@@ -213,11 +218,31 @@ def scan_text(text: str, settings: ScanSettings) -> list[PhiHit]:
     return sorted(hits, key=lambda h: (h.line, h.col, h.rule))
 
 
+_SNIFF_BYTES = 8192
+
+
+def _is_pdf(path: Path) -> bool:
+    return path.suffix.lower() == ".pdf"
+
+
 def is_binary(path: Path) -> bool:
-    if path.suffix.lower() == ".pdf":
+    if _is_pdf(path):
         return True
     with path.open("rb") as handle:
-        return b"\0" in handle.read(8192)
+        return b"\0" in handle.read(_SNIFF_BYTES)
+
+
+def _read_text(path: Path) -> str | None:
+    """Decoded text, or None for a binary file. One open: the first 8 KB decide
+    binary, and a binary file is never read past them. Raises OSError."""
+    if _is_pdf(path):
+        return None
+    with path.open("rb") as handle:
+        head = handle.read(_SNIFF_BYTES)
+        if b"\0" in head:
+            return None
+        data = head + handle.read()
+    return data.decode("utf-8", errors="replace")
 
 
 def in_scan_scope(rel: str) -> bool:
@@ -228,12 +253,18 @@ def in_scan_scope(rel: str) -> bool:
     return not any(p.startswith(".") or p in PHI_SKIP_DIR_NAMES for p in parts[:-1])
 
 
-def iter_scan_files(base: Path) -> Iterator[Path]:
+def _iter_candidates(base: Path) -> Iterator[Path]:
+    """Files in scope under `base`, unread. A directory that cannot be listed is
+    yielded too, so the scan reports it instead of silently skipping it."""
     if base.is_file():
-        if not is_binary(base):
-            yield base
+        yield base
         return
-    for dirpath, dirnames, filenames in os.walk(base):
+    unlisted: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(
+        base, onerror=lambda e: unlisted.append(base if e.filename is None else Path(e.filename))
+    ):
+        yield from unlisted
+        unlisted.clear()
         dirnames[:] = sorted(
             d for d in dirnames if not d.startswith(".") and d not in PHI_SKIP_DIR_NAMES
         )
@@ -242,8 +273,20 @@ def iter_scan_files(base: Path) -> Iterator[Path]:
             if here == base and name in PHI_SKIP_FILES:
                 continue
             path = here / name
-            if path.is_file() and not is_binary(path):
+            if path.is_file():
                 yield path
+    yield from unlisted
+
+
+def iter_scan_files(base: Path) -> Iterator[Path]:
+    """Text files phi-scan reads under `base`. Unreadable entries are kept (fail closed)."""
+    for path in _iter_candidates(base):
+        try:
+            if is_binary(path):
+                continue
+        except OSError:
+            pass
+        yield path
 
 
 class AllowlistError(ConfigError):
@@ -272,12 +315,16 @@ def load_allowlist(root: Path | None) -> frozenset[tuple[str, str, str]]:
 
 
 def _rel(path: Path, root: Path | None) -> str:
+    """`path` relative to `root`; both must already be resolved."""
     if root is not None:
         try:
-            return path.resolve().relative_to(root.resolve()).as_posix()
+            return path.relative_to(root).as_posix()
         except ValueError:
             pass
     return path.as_posix()
+
+
+UNREADABLE_RULE = "phi-unreadable"
 
 
 def scan(
@@ -289,10 +336,23 @@ def scan(
     rule_name: str | None = None,
 ) -> list[Finding]:
     findings = []
+    resolved_root = root.resolve() if root is not None else None
     for base in paths:
-        for path in iter_scan_files(base):
-            rel = _rel(path, root)
-            text = path.read_text(encoding="utf-8", errors="replace")
+        # Without a root, paths are reported as given (e.g. relative to the cwd).
+        start = base.resolve() if resolved_root is not None else base
+        for path in _iter_candidates(start):
+            rel = _rel(path, resolved_root)
+            try:
+                text = _read_text(path)
+            except OSError:
+                findings.append(
+                    Finding(
+                        rel, 0, rule_name or UNREADABLE_RULE, ERROR, "file could not be scanned"
+                    )
+                )
+                continue
+            if text is None:
+                continue
             for hit in scan_text(text, settings):
                 if (rel, hit.rule, hit.line_sha) in allow:
                     continue

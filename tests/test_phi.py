@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import random
 import re
 from collections.abc import Callable
@@ -23,7 +24,7 @@ from labbrain.phi import (
     scan_text,
 )
 from labbrain.validate import validate_path
-from labbrain.vault import Vault, load_config
+from labbrain.vault import ConfigError, Vault, load_config
 
 RNG = random.Random(20261015)
 TODAY = date(2026, 10, 15)
@@ -219,3 +220,84 @@ def test_validation_errors_never_echo_identifiers(vault_dir: Path) -> None:
         assert findings
         for fmt in ("text", "json", "github"):
             assert value not in render(findings, fmt)
+
+
+def test_lines_are_scanned_independently() -> None:
+    """Matching is per line: no match spans a line break."""
+    settings = ScanSettings()
+    assert scan_text("Lives at 12\nMaple Grove Ave today.\n", settings) == []
+    assert scan_text("Patient MRN\n" + mrn() + " later.\n", settings) == []
+    assert scan_text("n =\n4 patients\n", settings) != []  # "4 patients" alone is a small cell
+
+
+needs_permissions = pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0, reason="chmod 000 does not block root"
+)
+
+
+@needs_permissions
+def test_unreadable_file_is_reported_not_skipped(tmp_path: Path) -> None:
+    root = make_vault(tmp_path)
+    write(root, "concepts/ok.md", "Fine.\n")
+    locked = write(root, "manuscripts/main.md", f"Call {phone()}.\n")
+    locked.chmod(0)
+    try:
+        for rule_name, expected in ((None, "phi-unreadable"), ("phi", "phi")):
+            findings = scan(
+                [root], root=root, settings=ScanSettings(), allow=frozenset(), rule_name=rule_name
+            )
+            assert [(f.path, f.line, f.rule, f.message) for f in findings] == [
+                ("manuscripts/main.md", 0, expected, "file could not be scanned")
+            ]
+        assert [f.rule for f in lint.run(Vault.load(root), today=TODAY, only=["phi"])] == ["phi"]
+        assert [(f.rule, f.line, f.message) for f in validate_path(locked)] == [
+            ("phi", 0, "file could not be scanned")
+        ]
+    finally:
+        locked.chmod(0o644)
+
+
+@needs_permissions
+def test_unlistable_directory_is_reported_not_skipped(tmp_path: Path) -> None:
+    root = make_vault(tmp_path)
+    write(root, "concepts/ok.md", "Fine.\n")
+    locked = root / "manuscripts"
+    write(root, "manuscripts/main.md", "x\n")
+    locked.chmod(0)
+    try:
+        findings = scan([root], root=root, settings=ScanSettings(), allow=frozenset())
+        assert [(f.path, f.line, f.rule, f.message) for f in findings] == [
+            ("manuscripts", 0, "phi-unreadable", "file could not be scanned")
+        ]
+    finally:
+        locked.chmod(0o755)
+
+
+def test_non_utf8_denylist_is_a_config_error(tmp_path: Path) -> None:
+    root = make_vault(tmp_path)
+    (root / ".labbrain" / "phi-denylist.txt").write_bytes(b"Zebulon Quixley\n\xff\xfe\n")
+    with pytest.raises(ConfigError) as info:
+        ScanSettings.from_config(load_config(root), root)
+    assert str(info.value) == "phi denylist file cannot be read"
+    assert info.value.__suppress_context__
+
+
+@needs_permissions
+def test_unreadable_denylist_is_a_config_error(tmp_path: Path) -> None:
+    root = make_vault(tmp_path)
+    denylist = write(root, ".labbrain/phi-denylist.txt", "Zebulon Quixley\n")
+    denylist.chmod(0)
+    try:
+        with pytest.raises(ConfigError, match=r"\Aphi denylist file cannot be read\Z"):
+            ScanSettings.from_config(load_config(root), root)
+    finally:
+        denylist.chmod(0o644)
+
+
+def test_paths_without_root_are_reported_as_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write(tmp_path, "src/leak.md", f"Call {phone()}.\n")
+    monkeypatch.chdir(tmp_path)
+    findings = scan([Path("src")], root=None, settings=ScanSettings(), allow=frozenset())
+    assert [(f.path, f.rule) for f in findings] == [("src/leak.md", "phi-phone")]

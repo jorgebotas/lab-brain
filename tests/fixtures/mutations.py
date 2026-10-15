@@ -53,3 +53,76 @@ def replace(vault: Path, rel: str, old: str, new: str) -> None:
     text = path.read_text()
     assert text.count(old) == 1, f"{rel}: expected exactly one occurrence of {old!r}"
     path.write_text(text.replace(old, new))
+
+
+# --- schema -----------------------------------------------------------------
+
+
+@mutation("schema")
+def schema_bad_status(vault: Path) -> None:
+    """Concept status outside its enum. Sections, sources and links are untouched."""
+    replace(vault, CONCEPT, "status: active", "status: archived")
+
+
+@mutation("schema")
+def schema_id_mismatch(vault: Path) -> None:
+    """`id` disagrees with the filename. Notes are keyed by filename, so links still resolve."""
+    replace(vault, LITERATURE, "id: LIT-szegedy2016-rethinking", "id: LIT-szegedy2016-other")
+
+
+@mutation("schema")
+def schema_unknown_author(vault: Path) -> None:
+    """Decision author outside lab_members and agents; a human author needs no agent block."""
+    replace(vault, DECISION, "author: alice", "author: mallory")
+
+
+@mutation("schema")
+def schema_done_without_dataset(vault: Path) -> None:
+    """Done experiment loses `dataset`. The dataset keeps two other inbound links."""
+    replace(vault, BASELINE, "dataset: DS-20260801-main-split\n", "")
+
+
+@mutation("schema")
+def schema_invalid_yaml(vault: Path) -> None:
+    """Literature frontmatter stops parsing. It has no ID-bearing fields, so no links
+    are lost, and links to it still resolve by filename."""
+    replace(vault, LITERATURE, "venue: CVPR", "venue: [CVPR")
+
+
+@mutation("schema")
+def schema_stray_file(vault: Path) -> None:
+    """Markdown without frontmatter in a note folder. It has no type, so no other rule
+    inspects it, and its text matches no PHI pattern."""
+    (vault / "concepts" / "scratch-notes.md").write_text("just some text\n")
+
+
+@mutation("schema")
+def schema_duplicate_id(vault: Path) -> None:
+    """Same idea filename in inbox and archive. Ideas are exempt from orphan and the
+    copy is as recent as the original."""
+    src = vault / IDEA_OPEN
+    (vault / "ideas" / "archive" / src.name).write_text(src.read_text())
+
+
+# --- missing-section ----------------------------------------------------------
+
+
+@mutation("missing-section")
+def missing_required_section(vault: Path) -> None:
+    """EVAL-v1 loses its `## Known caveats` heading; the paragraph stays."""
+    replace(vault, EVAL_V1, "## Known caveats\n\n", "")
+
+
+@mutation("missing-section")
+def missing_future_agents_block(vault: Path) -> None:
+    """The agent-authored concept loses its leading block. undated-fact skips that
+    block anyway, and the remaining lines are unchanged."""
+    replace(
+        vault,
+        CONCEPT,
+        "## For future agents\n\n"
+        "Synthesis of what this project knows about label smoothing and calibration.\n"
+        "Numbers here are copied from linked experiments; "
+        "trust the experiment notes over this page.\n\n",
+        "",
+    )

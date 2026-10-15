@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Iterator
+from pathlib import Path
 
 from labbrain.findings import ERROR, WARNING, Finding
 from labbrain.lint import LintContext, rule
@@ -20,15 +22,50 @@ def _render(target: str) -> str:
     return target if _ECHOABLE_RE.match(target) else _NOT_AN_ID
 
 
+_FILENAMES_KEY = "link_rules.filenames"
+
+
+def _is_file(entry: os.DirEntry[str]) -> bool:
+    try:
+        return entry.is_file()  # follows symlinks, like Path.is_file
+    except OSError:
+        return False
+
+
+def _walk_filenames(root: Path) -> set[str]:
+    """Names of regular files (or symlinks to them) under `root`.
+
+    Descends only real directories whose name does not start with a dot (.git,
+    .obsidian, .labbrain, ...), and never collects an entry named `.git`.
+    """
+    names: set[str] = set()
+    stack = [os.fspath(root)]
+    while stack:
+        here = stack.pop()
+        try:
+            with os.scandir(here) as listing:
+                entries = list(listing)
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name == ".git":
+                continue
+            try:
+                is_real_dir = entry.is_dir(follow_symlinks=False)
+            except OSError:
+                is_real_dir = False
+            if is_real_dir:
+                if not entry.name.startswith("."):
+                    stack.append(entry.path)
+            elif _is_file(entry):
+                names.add(entry.name)
+    return names
+
+
 def _vault_filenames(ctx: LintContext) -> set[str]:
-    if "filenames" not in ctx.cache:
-        root = ctx.vault.root
-        ctx.cache["filenames"] = {
-            p.name
-            for p in root.rglob("*")
-            if p.is_file() and ".git" not in p.relative_to(root).parts
-        }
-    return ctx.cache["filenames"]
+    if _FILENAMES_KEY not in ctx.cache:
+        ctx.cache[_FILENAMES_KEY] = _walk_filenames(ctx.vault.root)
+    return ctx.cache[_FILENAMES_KEY]
 
 
 def _path_exists(ctx: LintContext, target: str) -> bool:

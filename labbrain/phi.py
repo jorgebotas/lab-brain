@@ -13,6 +13,7 @@ import os
 import re
 import stat
 from collections.abc import Iterable, Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -21,7 +22,7 @@ import yaml
 from labbrain.findings import ERROR, Finding, sort_findings
 from labbrain.layout import ALLOWLIST_PATH, INDEX_FILE, PHI_SKIP_DIR_NAMES, PHI_SKIP_FILES
 from labbrain.notes import safe_load
-from labbrain.vault import Config, ConfigError
+from labbrain.vault import Config, ConfigError, read_workers
 
 WINDOW = 30
 _MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?"
@@ -383,14 +384,27 @@ def _rel(path: Path, root: Path | None) -> str:
 UNREADABLE_RULE = "phi-unreadable"
 
 
-def _text_of(path: Path, texts: Mapping[Path, str] | None) -> str | None:
-    """Like _read_text, but from `texts` when it holds the file. A text with a NUL is
-    re-read from disk so the binary rule (NUL in the first 8 KB of bytes) decides."""
+def _in_memory(path: Path, texts: Mapping[Path, str] | None) -> str | None:
+    """The text from `texts` when it can stand in for a disk read, else None.
+
+    A text with a NUL is re-read from disk so the binary rule (NUL in the first 8 KB
+    of bytes) decides; PDFs are always binary."""
     if texts is not None and not _is_pdf(path):
         text = texts.get(path)
         if text is not None and "\0" not in text:
             return text
-    return _read_text(path)
+    return None
+
+
+# What a worker read: (True, text or None for binary) or (False, None) for an OSError.
+_ReadOutcome = tuple[bool, str | None]
+
+
+def _read_outcome(path: Path) -> _ReadOutcome:
+    try:
+        return True, _read_text(path)
+    except OSError:
+        return False, None
 
 
 def scan(
@@ -407,20 +421,36 @@ def scan(
     `texts` maps already-read files (as `Path`s under the resolved root, the way
     Vault.load names notes) to their content, decoded as utf-8 with
     errors="replace"; those files are not read again. Everything else is read
-    once from disk.
+    once from disk, in worker threads; results are processed in walk order.
     """
     findings = []
     resolved_root = root.resolve() if root is not None else None
+    candidates: list[tuple[Path, str | None]] = []
     for base in paths:
         # Without a root, paths are reported as given (e.g. relative to the cwd).
         start = base.resolve() if resolved_root is not None else base
-        for path, problem in _iter_candidates(start, resolved_root):
+        candidates.extend(_iter_candidates(start, resolved_root))
+    memory: dict[int, str] = {}
+    to_read: list[Path] = []
+    for index, (path, problem) in enumerate(candidates):
+        if problem is None:
+            text = _in_memory(path, texts)
+            if text is None:
+                to_read.append(path)
+            else:
+                memory[index] = text
+    with ThreadPoolExecutor(max_workers=read_workers()) as pool:
+        outcomes = pool.map(_read_outcome, to_read)
+        for index, (path, problem) in enumerate(candidates):
             rel = _rel(path, resolved_root)
+            text = None
             if problem is None:
-                try:
-                    text = _text_of(path, texts)
-                except OSError:
-                    problem = UNREADABLE
+                if index in memory:
+                    text = memory[index]
+                else:
+                    ok, text = next(outcomes)
+                    if not ok:
+                        problem = UNREADABLE
             if problem is not None:
                 findings.append(Finding(rel, 0, rule_name or UNREADABLE_RULE, ERROR, problem))
                 continue

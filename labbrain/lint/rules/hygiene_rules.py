@@ -9,7 +9,7 @@ from labbrain.findings import WARNING, Finding
 from labbrain.index import is_stale
 from labbrain.layout import INDEX_FILE
 from labbrain.lint import LintContext, rule
-from labbrain.notes import H2_RE, iter_body_lines
+from labbrain.notes import H2_RE, body_lines
 from labbrain.schema import FUTURE_AGENTS_HEADING
 
 # Percentages, or decimals with at least two fractional digits.
@@ -67,7 +67,7 @@ def undated_fact(ctx: LintContext) -> Iterator[Finding]:
         if note.type not in UNDATED_TYPES or not config.is_agent(note.get_str("author")):
             continue
         section: str | None = None
-        for lineno, line in iter_body_lines(note):
+        for lineno, line in body_lines(note):
             heading = H2_RE.match(line)
             if heading:
                 section = heading.group(1)

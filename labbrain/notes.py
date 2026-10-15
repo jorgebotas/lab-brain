@@ -149,6 +149,10 @@ class Note:
     errors: list[str] = field(default_factory=list)
     error_line: int = 1
     refs: list[LinkRef] = field(default_factory=list)
+    # (body it was computed from, its fence-aware lines); see body_lines().
+    _body_lines: tuple[str, list[tuple[int, str]]] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     @property
     def stem(self) -> str:
@@ -229,10 +233,24 @@ def parse_note_text(text: str, path: Path, rel: str) -> Note:
 
 def parse_note(path: Path, root: Path) -> Note:
     """Parse a note file. An unreadable file becomes a Note with a read error, never a raise."""
-    rel = path.relative_to(root).as_posix()
+    return parse_read_note(path, root, read_note_text(path))
+
+
+def read_note_text(path: Path) -> str | None:
+    """The file decoded as utf-8 with errors="replace", or None if it cannot be read.
+
+    Safe to call from worker threads: it only reads.
+    """
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        return path.read_text(encoding="utf-8", errors="replace")
     except OSError:
+        return None
+
+
+def parse_read_note(path: Path, root: Path, text: str | None) -> Note:
+    """Parse what read_note_text returned; None becomes a Note with a read error."""
+    rel = path.relative_to(root).as_posix()
+    if text is None:
         return Note(
             path=path,
             rel=rel,
@@ -245,18 +263,38 @@ def parse_note(path: Path, root: Path) -> Note:
     return parse_note_text(text, path, rel)
 
 
-def iter_body_lines(note: Note) -> Iterator[tuple[int, str]]:
-    """(file line number, line) for body lines outside fenced code blocks."""
+def _scan_body_lines(body: str, body_line: int) -> list[tuple[int, str]]:
+    """(file line number, line) for the lines of `body` outside fenced code blocks."""
+    out: list[tuple[int, str]] = []
     in_fence = False
-    for offset, line in enumerate(note.body.splitlines()):
+    for offset, line in enumerate(body.splitlines()):
         if _FENCE_RE.match(line):
             in_fence = not in_fence
             continue
         if not in_fence:
-            yield note.body_line + offset, line
+            out.append((body_line + offset, line))
+    return out
+
+
+def body_lines(note: Note) -> list[tuple[int, str]]:
+    """The fence-aware body lines, computed once per note body (do not mutate the list)."""
+    cached = note._body_lines
+    if cached is None or cached[0] is not note.body:
+        cached = (note.body, _scan_body_lines(note.body, note.body_line))
+        note._body_lines = cached
+    return cached[1]
+
+
+def iter_body_lines(note: Note) -> Iterator[tuple[int, str]]:
+    """(file line number, line) for body lines outside fenced code blocks."""
+    yield from body_lines(note)
 
 
 def wikilink_targets(line: str) -> list[str]:
+    # A link needs "[[" once inline code is removed; without a backtick nothing is removed,
+    # and without any "[" removal cannot create one.
+    if "[[" not in line and ("`" not in line or "[" not in line):
+        return []
     targets = []
     for match in _WIKILINK_RE.finditer(_INLINE_CODE_RE.sub("", line)):
         raw = match.group(1).split("\\|", 1)[0].split("|", 1)[0]
@@ -271,13 +309,13 @@ def _harvest_links(note: Note) -> list[LinkRef]:
     if note.data:
         for name in ID_FIELDS:
             refs.extend(LinkRef(target.strip(), 1, name) for target in note.get_list(name))
-    for lineno, line in iter_body_lines(note):
+    for lineno, line in body_lines(note):
         refs.extend(LinkRef(target, lineno, "body") for target in wikilink_targets(line))
     return [ref for ref in refs if ref.target and ref.target != note.stem]
 
 
 def h2_headings(note: Note) -> list[tuple[int, str]]:
-    return [(n, m.group(1)) for n, line in iter_body_lines(note) if (m := H2_RE.match(line))]
+    return [(n, m.group(1)) for n, line in body_lines(note) if (m := H2_RE.match(line))]
 
 
 def future_agents_end(lines: Sequence[str]) -> int | None:
@@ -302,7 +340,7 @@ def future_agents_end(lines: Sequence[str]) -> int | None:
 
 def future_agents_block(note: Note) -> list[str] | None:
     """Non-blank lines of the leading '## For future agents' block, else None."""
-    lines = [line for _, line in iter_body_lines(note)]
+    lines = [line for _, line in body_lines(note)]
     end = future_agents_end(lines)
     if end is None:
         return None

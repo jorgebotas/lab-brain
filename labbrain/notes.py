@@ -24,6 +24,7 @@ import yaml
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 from ruamel.yaml.error import YAMLError as RuamelYAMLError
+from ruamel.yaml.representer import RoundTripRepresenter
 
 from labbrain.schema import FUTURE_AGENTS_HEADING, ID_FIELDS, BaseNote, validate_frontmatter
 
@@ -70,6 +71,27 @@ def safe_load(text: str) -> Any:
     return yaml.load(text, Loader=_StrictLoader)  # safe: subclass of (C)SafeLoader
 
 
+_YAML11_RESOLVER = yaml.resolver.Resolver()
+_STR_TAG = "tag:yaml.org,2002:str"
+
+
+class _Yaml11SafeRepresenter(RoundTripRepresenter):
+    """Single-quote plain strings that PyYAML (YAML 1.1) would not read back as strings.
+
+    ruamel writes YAML 1.2, where ``yes``, ``No`` or ``on`` are plain strings, but reads
+    go through PyYAML, which resolves them to booleans. Only plain ``str`` values are
+    affected; ruamel's quoted scalar types keep their preserved style.
+    """
+
+    def represent_str(self, data: str) -> Any:
+        if _YAML11_RESOLVER.resolve(yaml.ScalarNode, data, (True, False)) != _STR_TAG:
+            return self.represent_scalar(_STR_TAG, data, style="'")
+        return super().represent_str(data)
+
+
+_Yaml11SafeRepresenter.add_representer(str, _Yaml11SafeRepresenter.represent_str)
+
+
 def rt_yaml(*, seq_offset: int = 2) -> YAML:
     """Round-trip YAML configured for Obsidian's property style.
 
@@ -78,6 +100,7 @@ def rt_yaml(*, seq_offset: int = 2) -> YAML:
     The setting is document-wide, so one note should use one style.
     """
     yaml = YAML(typ="rt")
+    yaml.Representer = _Yaml11SafeRepresenter
     yaml.preserve_quotes = True
     yaml.width = 4096
     if seq_offset == 0:

@@ -99,3 +99,13 @@ def test_skeleton_edits_are_one_line_diffs(tmp_path: Path) -> None:
         if line.startswith(("+ ", "- "))
     ]
     assert changed == ["- status: planned", "+ status: running"]
+
+
+YAML11_NON_STRING_TITLES = ["yes", "No", "on", "off", "null", "2026-10-15"]
+
+
+@pytest.mark.parametrize("title", YAML11_NON_STRING_TITLES)
+def test_yaml11_ambiguous_titles_validate_clean(vault_dir: Path, title: str) -> None:
+    path = create(vault_dir, load_config(vault_dir), "idea", title=title, author="alice", now=NOW)
+    assert f"title: '{title}'\n" in path.read_text()
+    assert validate_path(path) == []

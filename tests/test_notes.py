@@ -145,6 +145,19 @@ def test_update_frontmatter_noop_and_new_key(tmp_path: Path) -> None:
     assert new.replace("superseded_by: EXP-20261014-x\n", "") == SAMPLE
 
 
+@pytest.mark.parametrize("title", ["yes", "No", "on", "off", "null", "2026-10-15"])
+def test_update_frontmatter_quotes_yaml11_non_strings(tmp_path: Path, title: str) -> None:
+    path = tmp_path / "note.md"
+    plain = SAMPLE.replace('title: "Label smoothing vs. calibration"', "title: Plain title")
+    assert "title: Plain title   # keep this comment\n" in plain
+    path.write_text(plain)
+    assert update_frontmatter(path, {"title": title}) is True
+    assert f"title: '{title}'" in path.read_text()
+    note = parse_note(path, tmp_path)
+    assert note.errors == []
+    assert note.get("title") == title
+
+
 def test_update_frontmatter_writes_dates(tmp_path: Path) -> None:
     path = tmp_path / "note.md"
     path.write_text(SAMPLE)

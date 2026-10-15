@@ -1,6 +1,6 @@
 # labbrain core (M1 + M2) — Design
 
-Date: 2026-10-15 · Status: approved in brainstorming, pending written review
+Date: 2026-10-15 · Status: approved; amended after self-review (section 12)
 Parent spec: *lab-brain: ML Research Second Brain — Implementation Spec* (2026-10-13), sections 5, 6, 10, 11, 12.
 
 ## 1. Scope
@@ -40,6 +40,8 @@ lab-brain/
     ids.py                  # new_id(), slugify(), ID regexes, collision resolution
     scaffold.py             # skeleton notes for `labbrain new`
     sync.py                 # supersession propagation, protocol freezing
+    query.py                # list/filter notes, inbound/outbound links
+    confighash.py           # flatten config, apply hash_ignore, sha256
     index.py                # render index.md
     log.py                  # append to log/YYYY-MM-DD.md
     findings.py             # Finding + JSON serialization + message sanitizer
@@ -51,7 +53,7 @@ lab-brain/
         schema_rules.py     # schema, missing-section
         link_rules.py       # broken-link, orphan
         frozen_rules.py     # frozen-edit
-        protocol_rules.py   # protocol-missing, cross-protocol, claim-stale, duplicate-config
+        protocol_rules.py   # protocol-missing, cross-protocol, claim-stale, duplicate-config, sync-pending
         hygiene_rules.py    # concept-unsourced, inbox-age, dirty-code, undated-fact, index-stale
         phi_rules.py        # phi
   tests/
@@ -60,12 +62,13 @@ lab-brain/
     fixtures/mutations.py   # one named mutation per lint rule
     test_*.py
   docs/decisions/           # engine ADRs, ADR-YYYYMMDD-<slug>.md, decision-note format
+  .pre-commit-hooks.yaml    # lets vaults reference labbrain-lint / labbrain-phi-scan by repo URL
   .github/workflows/ci.yml
   CHANGELOG.md
   README.md                 # minimal until sub-project 5
 ```
 
-Deviations from the parent tree (each gets an ADR): `lint.py` → `lint/` package; added `findings.py`, `scaffold.py`, `sync.py`, `gitutil.py`.
+Deviations from the parent tree (each gets an ADR): `lint.py` → `lint/` package; added `findings.py`, `scaffold.py`, `sync.py`, `query.py`, `confighash.py`, `gitutil.py`, `.pre-commit-hooks.yaml`.
 
 ### Module boundaries
 
@@ -124,7 +127,11 @@ One parse pass builds:
 - `outbound: dict[id, set[id]]` and `inbound: dict[id, set[id]]`
 - `parse_errors: list[Finding]` (a bad note never aborts the load)
 
-Links are harvested from body wikilinks (`[[ID]]`, `[[ID|text]]`, `[[ID\|text]]`, `[[ID#heading]]`), ignoring fenced code blocks, and from every ID-bearing frontmatter field: `links`, `evidence`, `sources`, `protocol`, `dataset`, `supersedes`, `superseded_by`, `consolidated_into`, `split_of`, `changes_from`, `comparable_with`.
+Links are harvested from body wikilinks (`[[ID]]`, `[[ID|text]]`, `[[ID\|text]]`, `[[ID#heading]]`, `[[ID^block]]`), ignoring fenced code blocks and inline code, and from every ID-bearing frontmatter field: `links`, `evidence`, `sources`, `protocol`, `dataset`, `supersedes`, `superseded_by`, `consolidated_into`, `split_of`, `changes_from`, `comparable_with`.
+
+- **Path targets.** A wikilink or embed (`![[...]]`) whose target contains `/` or ends in a file extension (e.g. `![[raw/papers/x.pdf]]`, `[[figures/roc.png]]`) is a vault-relative path, resolved against the filesystem, not the ID map. It does not count toward `orphan`.
+- **Links survive model failure.** If the YAML parses but the model rejects it, links are still harvested from the raw frontmatter dict, so one bad field never makes other notes look orphaned. If the YAML itself is invalid, body wikilinks are still harvested. A note that fails to parse still registers its filename stem, so links *to* it do not break.
+- Self-links are ignored.
 
 ### Reading and writing
 
@@ -156,7 +163,9 @@ Links are harvested from body wikilinks (`[[ID]]`, `[[ID|text]]`, `[[ID\|text]]`
 
 Nested models: `tracker {backend, run_ids, url}`, `code {repo, sha, dirty}`, `metrics: [{name, value, split, run_id, as_of}]`.
 
-**Model-enforced conditionals** (owned by `schema`): experiment `dataset` required when `status: done`; concept `sources` key present.
+**Model-enforced conditionals** (owned by `schema`): experiment `dataset` required when `status: done`; concept `sources` key present; `superseded_by` required when `status: superseded` (experiment, decision, dataset); idea `consolidated_into` required when `status: consolidated`.
+
+Field types worth pinning: `created`/`updated`/`extracted`/`as_of` are dates; claim `value` is `float | list[float]`; `tolerance` is a non-negative float; `comparable_with`, `evidence`, `sources`, `links`, `tags` are lists of strings; `protocol` `version` is a positive int; `code.sha` is a 7–40 char hex string.
 
 ### Authorship
 
@@ -192,15 +201,28 @@ labbrain validate <path...> [--json]
 labbrain sync [--dry-run] [--json]
 labbrain index [--check]
 labbrain log "<text>" [--author A]
-labbrain lint [--json] [--base REF] [--rule R ...]
-labbrain phi-scan <path...> [--json]
+labbrain lint [--json | --format github] [--base REF] [--rule R ...]
+labbrain phi-scan <path...> [--json | --format github]
+labbrain list [--type T] [--status S] [--tag X] [--json]
+labbrain links <ID> [--in | --out] [--json]
+labbrain config-hash <config.yaml|config.json>
+labbrain schema [<type>]                 # JSON Schema of the frontmatter models
+labbrain --version
 ```
+
+`list` and `links` let skills and non-Claude agents query the graph without grepping YAML (`/brief`, `/consolidate` and the parent spec's `ideas list --open` become `list --type idea --status open`). `config-hash` implements the parent spec's section 9 hash now, so every caller hashes identically before `/exp-log` exists. `schema` exports pydantic's JSON Schema, so editors and other agents can validate frontmatter without Python. `--format github` emits `::error file=…,line=…::message` annotations for vault CI.
 
 **Exit codes:** 0 = no error-severity findings (warnings allowed); 1 = at least one error; 2 = usage or configuration problem.
 
 **JSON shape** (validate, sync, lint, phi-scan): `{"findings": [{"rule", "severity", "path", "line", "message"}], "summary": {"errors": n, "warnings": n, "info": n}}`.
 
-**`validate <path>`** is single-file and must not load the whole vault. Checks: parse, schema model, ID format, `id` = filename, author membership, duplicate filename (glob), `missing-section`, and phi when `protected_data`. Budget: < 300 ms.
+**`validate <path>`** is single-file and must not load the whole vault. Checks: parse, schema model, ID format, `id` = filename, author membership, duplicate filename (glob), `missing-section`, and phi when `protected_data`. Budget: < 300 ms. Because the M5 hook will call it on every write in the vault:
+- A path inside the vault that is not a note (a `README.md`, a log file, a manuscript) gets only the phi check (when protected), never a schema error.
+- A path outside the vault yields one `info` finding and exit 0.
+
+**`phi-scan`** uses the vault's config when run inside one, otherwise defaults (`min_cell_size: 11`, no denylist), so it also works on non-vault trees such as this repo.
+
+**Deterministic time:** every command reads `LABBRAIN_NOW` (ISO datetime) if set, else the local clock. Used by tests; documented as test-only.
 
 **`new <type>`** mints an ID, writes a skeleton under the type's folder with every common and type field present (empty/null), the type's default status (experiment `planned`, protocol `draft`, claim `draft`, idea `open`, concept `active`, decision `proposed`, literature `active`, handoff `final`, dataset `active`), a `## For future agents` block if the author is an agent, and every required H2. Prints the path. Every skeleton passes `validate` with zero findings.
 
@@ -233,6 +255,9 @@ Each condition is owned by exactly one rule, so each broken fixture can trigger 
 | `duplicate-config` | warning | Two non-superseded experiments share non-null `config_hash` and `protocol`, and neither directly supersedes the other |
 | `undated-fact` | warning | See below |
 | `index-stale` | warning | `index.md` exists and differs from generated output; skipped if absent (it is gitignored) |
+| `sync-pending` | warning / error | `sync --dry-run` would change something (warning: someone forgot to run it, so `claim-stale` and the index are working from stale status). Conflicting supersession, where X is claimed by two successors, is an error |
+
+`sync-pending` is a second addition to the parent rule table. Without it, a superseding note written by hand silently leaves its predecessor `done`, and `claim-stale` never fires.
 
 ### Comparability
 
@@ -259,6 +284,11 @@ For a frozen note:
 
 Pre-commit compares against `HEAD` (the pre-commit framework stashes unstaged changes, so the working tree equals the staged tree). CI passes `--base <merge-base>` so commits made with `--no-verify` are still caught. Not a git repo, or `--base` does not resolve → one `info` finding and the rule is skipped.
 
+**Implementation constraints:**
+- **Diff-driven.** Only files reported by `git diff --name-status --no-renames <base> -- <vault>` can violate the rule; unchanged notes are never read from git. A `D` entry is a deletion unless its ID exists elsewhere in the working tree (a move); a moved note is then compared against its base blob.
+- **Batched reads.** Base blobs are read through one `git cat-file --batch` process, never one `git show` per file. "Referenced by a `done` experiment at base" is computed only when a protocol is among the changed files.
+- **Subfolder vaults.** `gitutil` resolves the repo top level and the vault's prefix inside it (`git rev-parse --show-toplevel`), so `brain/` inside a code repo works and code changes outside the vault are ignored.
+
 ### `undated-fact`
 
 Applies to agent-authored **concept** and **claim** notes only (experiments are stamped through their own frontmatter; literature numbers come from the cited paper). For each body line outside code fences, headings and the `## History` section: if it contains a metric-like number (a percentage, or a decimal with ≥2 fractional digits), it must also contain one of: an `EXP-`/`LIT-`/`CLM-` wikilink, a `run_id`/`run:` token, or `as of YYYY-MM-DD`.
@@ -278,7 +308,9 @@ Applies to agent-authored **concept** and **claim** notes only (experiments are 
 | `phi-name` | Case-insensitive whole-word matches from the gitignored denylist file, if present |
 | `phi-small-cell` | Table cells in a column headed n / N / count / patients / subjects with integer 1…`min_cell_size − 1`; inline `n = 5`, `N=5`, `5 patients` / `5 subjects` in that range. `<11`-style suppressed values pass. |
 
-Scope: every text file in the vault except `scratch/`, `.git/`, `index.md` and binary files (null byte in the first 8 KB, or `raw/**/*.pdf`). Manuscripts **are** scanned.
+**Small-cell exemption for ML units.** ML notes say "n = 3 seeds" or "N=5 folds" constantly. An inline `n = k` immediately followed by a non-person unit (seeds, runs, folds, splits, epochs, layers, heads, models, trials, replicates, GPUs, nodes, samples-per-batch) is not flagged. A bare `n = 5`, or one followed by a person word, is flagged; that errs toward false positives, as the parent spec requires. Table columns headed `n` are always checked; a column of seed counts belongs under a header like `seeds`.
+
+Scope: every text file in the vault except `scratch/`, `.git/`, `.labbrain/` (config and allowlist hashes are not prose), `index.md` and binary files (null byte in the first 8 KB, or `raw/**/*.pdf`). Manuscripts **are** scanned.
 
 ### Output never contains matched text
 
@@ -308,6 +340,15 @@ Validation errors are a second leak path, because the PostToolUse validator feed
 - `tests/fixtures/valid/`: static vault with `.labbrain/config.yaml`, one note of each type, every note (except ideas/handoffs) linked from another, a current `index.md`, an empty allowlist.
 - `tests/fixtures/mutations.py`: one function per rule, `(vault_dir) -> None`, registered with the rule it must trigger. A pytest fixture copies `valid/` to `tmp_path`, `git init`s and commits it (needed for `frozen-edit`), then applies the mutation. Extra mutations cover sub-cases (status laundering, deletion, idea move, `raw/` edit, symmetric `comparable_with`, PHI per pattern).
 
+Harness rules that keep "exactly one rule fires" true:
+- **The valid fixture is always tested from a `tmp_path` copy with its own `git init`.** `tests/fixtures/valid/` sits inside the engine repo, so running git commands there would diff against the engine's own history.
+- **The harness deletes `index.md` after every mutation except the `index-stale` one.** Almost any edit changes a title or summary and would otherwise also trip `index-stale`.
+- **Every mutation except a `frozen-edit` one is committed before linting**, so `base == working tree` and `frozen-edit` sees no diff. Mutations can then edit frozen notes naturally (e.g. stripping `protocol` from a done experiment for `protocol-missing`). `frozen-edit` mutations are left uncommitted.
+- **Every non-exempt note in the valid fixture has at least two inbound links**, so a mutation that removes one link never creates an orphan.
+- **The deletion mutation removes a handoff or idea**, which are always frozen and need no inbound links. Deleting a linked note would correctly also fire `broken-link`.
+- **The `schema` mutations keep the YAML parseable** (bad enum, wrong type, `id` ≠ filename), plus one invalid-YAML mutation on the literature note, which has no ID-bearing frontmatter, so losing its frontmatter drops no links.
+- **Each mutation's docstring says why no other rule fires.** Reviewers check that claim, not the code.
+
 ### Gate tests
 
 - Valid fixture: zero findings at **every** severity, with `today` pinned.
@@ -317,6 +358,9 @@ Validation errors are a second leak path, because the PostToolUse validator feed
 - `sync` on a fixture with a pending supersession: second run is a no-op; output passes `frozen-edit`.
 - ruamel round-trip: changing one field changes exactly one line of the file.
 - An idea moved inbox → archive with an allowed status change: no `frozen-edit` finding.
+- Subfolder vault (`brain/` inside a repo with code commits): `frozen-edit` checks only vault files.
+- `config-hash`: key order, nesting style and `hash_ignore` keys do not change the hash; any other value change does.
+- `.pre-commit-hooks.yaml`: `pre-commit try-repo .` runs both hooks against the valid fixture (CI only; skipped if `pre-commit` is not installed).
 
 ### PHI tests
 
@@ -350,6 +394,10 @@ pytest-cov with `fail_under = 85` over `schema`, `ids`, `lint`, `phi`, `vault`. 
 12. Python ≥ 3.11
 13. Mutation-based broken fixtures
 14. `literature` and `handoff` status enums; protocol numbering as the one counter
+15. `sync-pending` lint rule (second addition to parent rule table)
+16. Query and utility commands: `list`, `links`, `config-hash`, `schema`, `--format github`, `.pre-commit-hooks.yaml`
+17. Small-cell exemption for ML unit words
+18. Path-style wikilinks and embeds resolve against the filesystem
 
 ## 11. Notes for later sub-projects
 
@@ -357,3 +405,16 @@ pytest-cov with `fail_under = 85` over `schema`, `ids`, `lint`, `phi`, `vault`. 
 - **Plugin/hooks (3):** call `labbrain validate` (budget 300 ms) from PostToolUse; frozen-file hook reuses `frozen_rules` logic; `claude` CLI is not on this machine's PATH yet (needed for headless smoke tests). Open decision: how much `_kit/` skill wording to reuse from `/Users/jbotas/kb-vault/_kit`.
 - **Claims/literature (4):** claims are not frozen, but `## History` append discipline could become a rule. Open decision: manuscript format.
 - **Before first push:** GitHub org and repo visibility.
+
+## 12. Changelog
+
+- 2026-10-15: Initial design from brainstorming.
+- 2026-10-15: Self-review amendments.
+  - Gate-safety harness rules: commit non-`frozen-edit` mutations; delete `index.md`; two inbound links per note.
+  - Links survive model or parse failure; path-style wikilinks resolve against the filesystem.
+  - `frozen-edit` is diff-driven, batched and subfolder-aware.
+  - `validate` handles non-note paths and paths outside the vault.
+  - `phi-scan` runs outside a vault and skips `.labbrain/`; small-cell exemption for ML units.
+  - Added conditional schema requirements (`superseded_by`, `consolidated_into`) and pinned field types.
+  - Added the `sync-pending` rule.
+  - Added `list`, `links`, `config-hash`, `schema`, `--format github`, `--version`, `.pre-commit-hooks.yaml` and `LABBRAIN_NOW`.

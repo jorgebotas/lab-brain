@@ -36,11 +36,34 @@ def test_sanitize_strips_control_chars_and_caps_length() -> None:
     assert len(msg) == 300
 
 
-def test_sanitize_long_input_is_fast() -> None:
+@pytest.mark.parametrize(
+    ("message", "expected_len"),
+    [
+        ("a" * 100_000, 0),  # one token cut by the pre-cap: dropped whole
+        ("a" * 1_199 + " " + "a" * 98_800, 300),  # longest surviving run: worst-case regex work
+    ],
+    ids=["single-token", "surviving-run"],
+)
+def test_sanitize_long_input_is_fast(message: str, expected_len: int) -> None:
     start = time.perf_counter()
-    msg = sanitize("a" * 100_000)
+    msg = sanitize(message)
     assert time.perf_counter() - start < 0.1
-    assert len(msg) == 300
+    assert len(msg) == expected_len
+
+
+@pytest.mark.parametrize(
+    ("padding", "value"),
+    [
+        (" " * 1195, "1234567890"),
+        (" " * 1190, "someone@example.org"),
+        ("\x00" * 1195, "1234567890"),  # control chars become whitespace after the cut
+    ],
+    ids=["digits", "email", "digits-after-control-chars"],
+)
+def test_sanitize_pre_cap_drops_cut_token(padding: str, value: str) -> None:
+    msg = sanitize(padding + value)
+    for end in range(5, len(value) + 1):
+        assert value[:end] not in msg
 
 
 def test_finding_sanitizes_on_construction() -> None:

@@ -24,13 +24,20 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
 _DIGIT_RUN = re.compile(r"(?<![\w-])\d{6,}(?![\w-])")
 _EMAIL = re.compile(r"[\w.%+-]+@[\w-]+(?:\.[\w-]+)+")
 _MAX_MESSAGE = 300
-_PRE_CAP = 4 * _MAX_MESSAGE  # bounds regex work; the final cap discards the rest anyway
+# Inputs longer than this are cut before the regexes run, which bounds their (backtracking)
+# cost. The token straddling the cut is dropped whole, so no fragment of an identifier can
+# escape redaction, however much whitespace collapsing later shrinks the text.
+_PRE_CAP = 4 * _MAX_MESSAGE
 
 
 def sanitize(message: str) -> str:
     """Strip control characters, redact identifier-like tokens, cap the length."""
-    text = message[:_PRE_CAP]
-    text = _CONTROL.sub(" ", text)
+    text = _CONTROL.sub(" ", message[:_PRE_CAP])
+    if len(message) > _PRE_CAP:
+        end = len(text)
+        while end and not text[end - 1].isspace():
+            end -= 1
+        text = text[:end]
     text = _EMAIL.sub("[redacted]", text)
     text = _DIGIT_RUN.sub("[redacted]", text)
     text = " ".join(text.split())

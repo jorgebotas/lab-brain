@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from fixtures.mutations import BASELINE, EVAL_V2, IDEA_OPEN, SMOOTHING, replace
+from fixtures.mutations import BASELINE, EVAL_V2, IDEA_OPEN, RAW_PAPER, SMOOTHING, replace
 from helpers import FIXTURE, TODAY, commit_all, git
 
 from labbrain import gitutil, lint
@@ -123,4 +124,51 @@ def test_git_failure_mid_rule_is_an_error_not_a_crash(
     monkeypatch.setattr(gitutil, failing, fail)
     assert frozen(vault_dir) == [
         ("error", "", "git failed while checking frozen notes; frozen-edit could not run")
+    ]
+
+
+def test_mis_cased_subfolder_vault_still_reports_violations(tmp_path: Path) -> None:
+    repo = tmp_path / "code"
+    repo.mkdir()
+    shutil.copytree(FIXTURE, repo / "brain")
+    git(repo, "init", "-q", "-b", "main")
+    commit_all(repo)
+    mis_cased = repo / "BRAIN"
+    if not mis_cased.exists():
+        pytest.skip("case-sensitive filesystem")
+    replace(repo / "brain", BASELINE, "status: done", "status: running")
+    assert frozen(mis_cased) == [
+        ("error", BASELINE, "status change done → running is not allowed on a frozen experiment")
+    ]
+
+
+def test_adding_a_raw_file_is_allowed(vault_dir: Path) -> None:
+    (vault_dir / "raw" / "papers" / "new-source.txt").write_text("A new source.\n")
+    git(vault_dir, "add", "-A")
+    assert frozen(vault_dir) == []
+    commit_all(vault_dir, "ingest source")
+    assert frozen(vault_dir, base="HEAD~1") == []
+
+
+def test_raw_mode_only_change_is_allowed(vault_dir: Path) -> None:
+    git(vault_dir, "config", "core.fileMode", "true")
+    (vault_dir / RAW_PAPER).chmod(0o755)
+    assert git(vault_dir, "diff", "--name-status", "HEAD").split() == ["M", RAW_PAPER]
+    assert frozen(vault_dir) == []
+
+
+@pytest.mark.parametrize(
+    ("edit", "verb"),
+    [
+        (lambda path: path.write_bytes(path.read_bytes() + b"An added line.\n"), "modified"),
+        (lambda path: path.unlink(), "deleted"),
+    ],
+    ids=["modified", "deleted"],
+)
+def test_existing_raw_file_changes_are_errors(
+    vault_dir: Path, edit: Callable[[Path], None], verb: str
+) -> None:
+    edit(vault_dir / RAW_PAPER)
+    assert frozen(vault_dir) == [
+        ("error", RAW_PAPER, f"raw/ files are immutable; this file was {verb}")
     ]

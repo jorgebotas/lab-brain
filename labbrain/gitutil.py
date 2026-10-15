@@ -6,7 +6,6 @@ code repository works and code changes outside the vault are ignored.
 
 from __future__ import annotations
 
-import os
 import subprocess
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -43,33 +42,21 @@ class Repo:
 
 
 def open_repo(vault_root: Path) -> Repo | None:
+    """Both the toplevel and the prefix come from git, so a mis-cased path is canonicalised."""
     try:
         out = subprocess.run(
-            ["git", "-C", str(vault_root), "rev-parse", "--show-toplevel"],
+            ["git", "-C", str(vault_root), "rev-parse", "--show-toplevel", "--show-prefix"],
             capture_output=True,
             text=True,
             check=True,
-        ).stdout.strip()
+        ).stdout
     except (OSError, subprocess.CalledProcessError):
         return None
-    top = Path(out).resolve()
-    vault = vault_root.resolve()
-    try:
-        rel = vault.relative_to(top).as_posix()
-    except ValueError:
-        # Spelled differently (e.g. case on macOS): find the ancestor that is the same directory.
-        ancestor = next((p for p in (vault, *vault.parents) if _same_dir(p, top)), None)
-        if ancestor is None:
-            return None
-        top, rel = ancestor, vault.relative_to(ancestor).as_posix()
-    return Repo(top, "" if rel == "." else rel)
-
-
-def _same_dir(a: Path, b: Path) -> bool:
-    try:
-        return os.path.samefile(a, b)
-    except OSError:
-        return False
+    lines = out.split("\n")
+    if not lines[0]:
+        return None
+    prefix = lines[1].rstrip("/") if len(lines) > 1 else ""
+    return Repo(Path(lines[0]).resolve(), prefix)
 
 
 def resolve_ref(repo: Repo, ref: str) -> str | None:

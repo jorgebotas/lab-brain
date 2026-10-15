@@ -80,6 +80,15 @@ def _field_label(key: Any) -> str:
     return f"'{key}'" if isinstance(key, str) and key in _FIELD_NAMES else "<unknown field>"
 
 
+def _raw_bytes_differ(path: Path, tree: dict[str, str], blobs: dict[str, bytes], rel: str) -> bool:
+    if rel not in tree:
+        return True
+    try:
+        return path.read_bytes() != blobs[tree[rel]]
+    except OSError:
+        return True
+
+
 def _parse_blob(data: bytes, rel: str) -> Note:
     return parse_note_text(data.decode("utf-8", "replace"), Path(rel), rel)
 
@@ -169,15 +178,23 @@ def frozen_edit(ctx: LintContext) -> Iterator[Finding]:
 def _check(ctx: LintContext, repo: gitutil.Repo, base: str) -> Iterator[Finding]:
     """The diff-driven checks; may raise GitError, which the rule turns into one finding."""
     changes = gitutil.changed_files(repo, base)
-    for status, rel in changes:
-        if rel.startswith(f"{RAW_DIR}/"):
-            verb = "deleted" if status == "D" else "modified"
-            yield Finding(rel, 0, RULE, ERROR, f"raw/ files are immutable; this file was {verb}")
+    # Only existing raw/ files are immutable: additions are the ingest workflow, and a
+    # modification counts only when the bytes differ (mode-only changes are allowed).
+    raw_changes = [(s, rel) for s, rel in changes if rel.startswith(f"{RAW_DIR}/") and s != "A"]
     note_changes = [(s, rel) for s, rel in changes if s in ("M", "D", "T") and is_note_rel(rel)]
+    raw_edits = [rel for s, rel in raw_changes if s in ("M", "T")]
+    if not (raw_changes or note_changes):
+        return
+    tree = gitutil.ls_tree(repo, base) if raw_edits or note_changes else {}
+    wanted = [rel for rel in raw_edits + [rel for _, rel in note_changes] if rel in tree]
+    blobs = gitutil.read_blobs(repo, [tree[rel] for rel in wanted])
+    for status, rel in raw_changes:
+        if status == "D":
+            yield Finding(rel, 0, RULE, ERROR, "raw/ files are immutable; this file was deleted")
+        elif status in ("M", "T") and _raw_bytes_differ(ctx.vault.root / rel, tree, blobs, rel):
+            yield Finding(rel, 0, RULE, ERROR, "raw/ files are immutable; this file was modified")
     if not note_changes:
         return
-    tree = gitutil.ls_tree(repo, base)
-    blobs = gitutil.read_blobs(repo, [tree[rel] for _, rel in note_changes if rel in tree])
     done_protocols = _DoneProtocolsAtBase(repo, tree)
     for status, rel in note_changes:
         if rel not in tree:

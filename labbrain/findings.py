@@ -24,11 +24,13 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
 _DIGIT_RUN = re.compile(r"(?<![\w-])\d{6,}(?![\w-])")
 _EMAIL = re.compile(r"[\w.%+-]+@[\w-]+(?:\.[\w-]+)+")
 _MAX_MESSAGE = 300
+_PRE_CAP = 4 * _MAX_MESSAGE  # bounds regex work; the final cap discards the rest anyway
 
 
 def sanitize(message: str) -> str:
     """Strip control characters, redact identifier-like tokens, cap the length."""
-    text = _CONTROL.sub(" ", message)
+    text = message[:_PRE_CAP]
+    text = _CONTROL.sub(" ", text)
     text = _EMAIL.sub("[redacted]", text)
     text = _DIGIT_RUN.sub("[redacted]", text)
     text = " ".join(text.split())

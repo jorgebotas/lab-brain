@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -32,6 +33,13 @@ def test_sanitize_keeps_ids_and_short_numbers() -> None:
 def test_sanitize_strips_control_chars_and_caps_length() -> None:
     msg = sanitize("a\nb\x1b[31m" + "x" * 500)
     assert "\n" not in msg and "\x1b" not in msg
+    assert len(msg) == 300
+
+
+def test_sanitize_long_input_is_fast() -> None:
+    start = time.perf_counter()
+    msg = sanitize("a" * 100_000)
+    assert time.perf_counter() - start < 0.1
     assert len(msg) == 300
 
 

@@ -328,3 +328,63 @@ def phi_small_cell_in_dataset(vault: Path) -> None:
         "All images; no filtering.",
         "All images; no filtering. Excluded: n = 4 patients.",
     )
+
+
+# --- frozen-edit (left uncommitted) --------------------------------------------------
+
+
+@mutation("frozen-edit", commit=False)
+def frozen_body_rewrite(vault: Path) -> None:
+    """A done experiment's Results row is rewritten. Experiments are exempt from
+    undated-fact and the frontmatter metrics are untouched."""
+    replace(
+        vault, BASELINE, "| auroc_median | 0.81 | run-001 |", "| auroc_median | 0.83 | run-001 |"
+    )
+
+
+@mutation("frozen-edit", commit=False)
+def frozen_status_laundering(vault: Path) -> None:
+    """done → running on a frozen experiment. EVAL-v2 is still referenced by the other done
+    experiment, and running evidence is not stale."""
+    replace(vault, BASELINE, "status: done", "status: running")
+
+
+@mutation("frozen-edit", commit=False)
+def frozen_field_change(vault: Path) -> None:
+    """A frozen experiment's hypothesis is rewritten."""
+    replace(
+        vault,
+        SMOOTHING,
+        'hypothesis: "Label smoothing improves calibration without lowering AUROC"',
+        'hypothesis: "Label smoothing improves AUROC"',
+    )
+
+
+@mutation("frozen-edit", commit=False)
+def frozen_handoff_deleted(vault: Path) -> None:
+    """Handoffs are always frozen. Every note the handoff links to keeps another inbound link."""
+    (vault / HANDOFF).unlink()
+
+
+@mutation("frozen-edit", commit=False)
+def frozen_raw_modified(vault: Path) -> None:
+    """raw/ files are immutable."""
+    with (vault / RAW_PAPER).open("a") as handle:
+        handle.write("An added line.\n")
+
+
+@mutation("frozen-edit", commit=False)
+def frozen_idea_body_rewrite(vault: Path) -> None:
+    """Ideas are create-only; rewording one is a modification."""
+    replace(vault, IDEA_OPEN, "see whether late-epoch calibration holds.", "see whether it helps.")
+
+
+@mutation("frozen-edit", commit=False)
+def frozen_decision_retitled(vault: Path) -> None:
+    """An accepted ADR's title changes."""
+    replace(
+        vault,
+        DECISION,
+        'title: "Adopt EVAL-v2 for all new experiments"',
+        'title: "Adopt EVAL-v2"',
+    )

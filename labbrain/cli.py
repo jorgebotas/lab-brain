@@ -199,11 +199,15 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
     vault = _vault(args)
     changes, conflicts = plan(vault)
+    failed = []
     if not args.dry_run:
-        apply(vault, changes, today())
+        _, failed = apply(vault, changes, today())
     verb = "would update" if args.dry_run else "updated"
-    findings = [Finding(c.rel, 1, "sync", ERROR, c.message) for c in conflicts]
+    findings = [Finding(c.rel, 1, "sync", ERROR, c.message) for c in conflicts + failed]
+    failed_rels = {c.rel for c in failed}
     for change in changes:
+        if change.rel in failed_rels:
+            continue
         fields = ", ".join(f"{key} → {value}" for key, value in change.updates.items())
         findings.append(Finding(change.rel, 1, "sync", INFO, f"{verb}: {fields} ({change.reason})"))
     return _emit(sort_findings(findings), args.format)
@@ -289,6 +293,7 @@ def cmd_phi_scan(args: argparse.Namespace) -> int:
 
 
 def cmd_list(args: argparse.Namespace) -> int:
+    from labbrain.findings import strip_controls
     from labbrain.query import list_notes
 
     rows = list_notes(_vault(args), note_type=args.note_type, status=args.status, tag=args.tag)
@@ -296,7 +301,9 @@ def cmd_list(args: argparse.Namespace) -> int:
         print(json.dumps(rows, indent=2))
     else:
         for row in rows:
-            print(f"{row['id']}\t{row['type']}\t{row['status'] or ''}\t{row['title'] or ''}")
+            # Titles are free text: no control characters (terminal escapes, line breaks).
+            cells = (row["id"], row["type"], row["status"] or "", row["title"] or "")
+            print("\t".join(" ".join(strip_controls(str(c)).split()) for c in cells))
     return EXIT_OK
 
 

@@ -344,3 +344,39 @@ def test_lint_default_base_in_an_empty_repo_is_info(
     assert code == 0 and "base revision HEAD not found; frozen-edit skipped" in out
     code, _, err = run(capsys, "lint", "--base", "HEAD")
     assert code == 2 and "--base does not name a commit" in err
+
+
+def test_list_text_strips_control_characters(
+    vault_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    replace(
+        vault_dir,
+        CONCEPT,
+        'title: "Label smoothing and calibration"',
+        'title: "Evil\\e[2J\\u202eTitle\\nnext"',
+    )
+    code, out, _ = run(capsys, "list", "--type", "concept")
+    assert code == 0
+    assert not any(ch in out for ch in "\x1b\u202e")
+    assert out.count("\n") == 1 and "Evil" in out and "Title" in out
+
+
+def test_sync_write_failure_is_an_error_finding(
+    vault_dir: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import labbrain.sync as sync_module
+
+    def fail(path: Path, updates: dict) -> bool:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(sync_module, "update_frontmatter", fail)
+    replace(
+        vault_dir,
+        SMOOTHING,
+        "links: [EXP-20260901-baseline]",
+        "links: [EXP-20260901-baseline]\nsupersedes: EXP-20260901-baseline",
+    )
+    code, out, err = run(capsys, "sync")
+    assert code == 1 and err == ""
+    assert f"{BASELINE}:1: error [sync] could not write: file could not be written" in out
+    assert "updated:" not in out

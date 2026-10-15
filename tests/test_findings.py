@@ -182,3 +182,16 @@ def test_display_id_echoes_valid_ids_and_known_notes() -> None:
     assert display_id("Odd Name", known={"Odd Name"}) == "Odd Name"
     assert display_id("RUN-20261001-a", prefixes={"experiment": "RUN"}) == "RUN-20261001-a"
     assert display_id("EXP-20261001-a", prefixes={"experiment": "RUN"}) == NOT_AN_ID
+
+
+def test_sanitize_strips_c1_controls_and_bidi_overrides() -> None:
+    msg = sanitize("a\x9b31mb \u202eevil\u202c c\u2066d\u2069")
+    assert not any(ch in msg for ch in "\x9b\u202e\u202c\u2066\u2069")
+
+
+def test_renderers_strip_controls_from_path_and_rule() -> None:
+    finding = Finding("dir/a\x1b[31m\u202e.md", 2, "ru\nle", ERROR, "m")
+    for fmt in ("text", "github"):
+        out = render([finding], fmt)
+        assert not any(ch in out for ch in "\x1b\u202e"), fmt
+        assert "ru\nle" not in out, fmt

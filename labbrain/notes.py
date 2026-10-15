@@ -14,6 +14,7 @@ import os
 import re
 import stat
 import tempfile
+import warnings
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -412,21 +413,25 @@ def update_frontmatter(path: Path, updates: Mapping[str, Any]) -> bool:
     crlf = text[: match.start("fm")].endswith("\r\n")
     frontmatter = match.group("fm").replace("\r\n", "\n")
     yaml = rt_yaml(seq_offset=_detect_seq_offset(frontmatter))
-    try:
-        data = yaml.load(frontmatter) or CommentedMap()
-    except RuamelYAMLError as exc:
-        line = _yaml_error_line(exc)
-        raise ValueError(f"{path.name}: frontmatter cannot be updated (line {line})") from None
-    changed = False
-    for key, value in updates.items():
-        if key in data and data[key] == value:
-            continue
-        data[key] = _yaml11_safe(value)
-        changed = True
-    if not changed:
-        return False
-    buffer = io.StringIO()
-    yaml.dump(data, buffer)
+    # ruamel's warnings (a reused anchor, say) quote the YAML source, i.e. field values.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            data = yaml.load(frontmatter) or CommentedMap()
+        except RuamelYAMLError as exc:
+            line = _yaml_error_line(exc)
+            message = f"{path.name}: frontmatter cannot be updated (line {line})"
+            raise ValueError(message) from None
+        changed = False
+        for key, value in updates.items():
+            if key in data and data[key] == value:
+                continue
+            data[key] = _yaml11_safe(value)
+            changed = True
+        if not changed:
+            return False
+        buffer = io.StringIO()
+        yaml.dump(data, buffer)
     dumped = buffer.getvalue()
     if crlf:
         dumped = dumped.replace("\n", "\r\n")

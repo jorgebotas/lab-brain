@@ -395,7 +395,13 @@ def _iter_candidates(base: Path, boundary: Path | None = None) -> Iterator[tuple
                     else:
                         yield path, OUTSIDE
                 elif entry.is_file():
-                    if not (here == base and entry.name in PHI_SKIP_FILES):
+                    # Skip files (the generated index.md) only at the vault root:
+                    # elsewhere, or with no vault, an index.md is ordinary text.
+                    if not (
+                        boundary is not None
+                        and entry.name in PHI_SKIP_FILES
+                        and here.resolve() == boundary
+                    ):
                         yield path, None
             except OSError:
                 yield path, UNREADABLE
@@ -403,9 +409,10 @@ def _iter_candidates(base: Path, boundary: Path | None = None) -> Iterator[tuple
 
 
 def iter_scan_files(base: Path) -> Iterator[Path]:
-    """Text files phi-scan reads under `base`. Unreadable entries are kept (fail closed);
-    symlinked directories outside `base` are not traversed."""
-    for path, problem in _iter_candidates(base):
+    """Text files phi-scan reads under `base`, taken as the vault root. Unreadable
+    entries are kept (fail closed); symlinked directories outside `base` are not
+    traversed."""
+    for path, problem in _iter_candidates(base, base.resolve()):
         if problem == OUTSIDE:
             continue
         if problem is None:

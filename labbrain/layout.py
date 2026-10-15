@@ -54,7 +54,7 @@ LOG_DIR = "log"
 RAW_DIR = "raw"
 
 # phi-scan skips these directory names (and every dot-directory) at any depth,
-# and these file names at the top of the scanned tree.
+# and these file names at the vault root only.
 PHI_SKIP_DIR_NAMES: frozenset[str] = frozenset({"scratch", "__pycache__", "node_modules"})
 PHI_SKIP_FILES: frozenset[str] = frozenset({INDEX_FILE})
 

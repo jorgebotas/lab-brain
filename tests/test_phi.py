@@ -530,3 +530,14 @@ def test_text_file_with_unrecognised_nul_bytes_is_reported(tmp_path: Path) -> No
     assert [(f.path, f.rule, f.message) for f in findings] == [
         ("manuscripts/table.csv", "phi-unreadable", "text file is not in a readable encoding")
     ]
+
+
+def test_only_the_vault_root_index_is_skipped(tmp_path: Path) -> None:
+    root = make_vault(tmp_path)
+    write(root, "index.md", f"Call {phone()}.\n")
+    write(root, "manuscripts/index.md", f"Call {phone()}.\n")
+    for target in (root, root / "manuscripts"):
+        findings = scan([target], root=root, settings=ScanSettings(), allow=frozenset())
+        assert [(f.path, f.rule) for f in findings] == [("manuscripts/index.md", "phi-phone")]
+    alone = scan([root / "manuscripts"], root=None, settings=ScanSettings(), allow=frozenset())
+    assert [f.rule for f in alone] == ["phi-phone"]

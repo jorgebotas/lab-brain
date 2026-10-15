@@ -4,6 +4,7 @@ import difflib
 import os
 import random
 import stat
+import warnings
 from datetime import date
 from pathlib import Path
 
@@ -306,3 +307,18 @@ def test_unreadable_file_is_a_note_with_a_read_error(tmp_path: Path) -> None:
     assert note.data is None and note.body == "" and note.body_line == 1
     assert note.errors == ["cannot read file"]
     assert note.refs == []
+
+
+def test_update_frontmatter_never_warns_with_source_snippets(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ruamel warnings (e.g. a reused anchor) quote the YAML source: they are suppressed."""
+    value = _synthetic_value(41)
+    path = tmp_path / "note.md"
+    path.write_text(f"---\na: &x {value}\nb: &x other\nc: *x\n---\nbody\n")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert update_frontmatter(path, {"status": "done"}) is True
+    assert [str(w.message) for w in caught] == []
+    out, err = capsys.readouterr()
+    assert value not in out + err

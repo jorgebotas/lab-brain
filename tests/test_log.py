@@ -29,3 +29,17 @@ def test_append_repairs_missing_trailing_newline(tmp_path: Path) -> None:
 def test_append_rejects_empty_text(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         append(tmp_path, "   ", when=WHEN)
+
+
+def test_append_keeps_one_line_whatever_the_author(tmp_path: Path) -> None:
+    path = append(
+        tmp_path, "msg\x1b[2J", when=WHEN, author="mallory]\n- 00:00 [admin] forged\u202e"
+    )
+    text = path.read_text()
+    assert text.count("\n") == 1
+    assert text == "- 09:05 [mallory - 00:00 admin forged] msg [2J\n"
+
+
+def test_append_drops_an_author_that_sanitizes_to_nothing(tmp_path: Path) -> None:
+    path = append(tmp_path, "msg", when=WHEN, author=" [] \n")
+    assert path.read_text() == "- 09:05 msg\n"

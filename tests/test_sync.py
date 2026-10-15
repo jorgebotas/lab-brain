@@ -4,6 +4,7 @@ import random
 from datetime import date
 from pathlib import Path
 
+import pytest
 from fixtures.mutations import BASELINE, EVAL_V2, SMOOTHING, replace
 from helpers import TODAY, body_for, make_vault, note_text, write
 
@@ -35,7 +36,7 @@ def test_supersession_is_planned_applied_and_idempotent(vault_dir: Path) -> None
             "superseded by EXP-20260910-label-smoothing",
         )
     ]
-    assert apply(vault, changes, TODAY) == [BASELINE]
+    assert apply(vault, changes, TODAY) == ([BASELINE], [])
     text = (vault_dir / BASELINE).read_text()
     assert "status: superseded\n" in text
     assert "superseded_by: EXP-20260910-label-smoothing\n" in text
@@ -167,3 +168,66 @@ def test_conflict_message_hides_an_identifier_shaped_value(tmp_path: Path) -> No
     _, conflicts = plan(Vault.load(root))
     assert ssn not in conflicts[0].message
     assert "already superseded by <not a valid note ID>" in conflicts[0].message
+
+
+def test_self_supersession_is_a_conflict(tmp_path: Path) -> None:
+    root = make_vault(tmp_path)
+    write(
+        root,
+        "decisions/ADR-20261001-self.md",
+        note_text("ADR-20261001-self", "decision", supersedes="ADR-20261001-self"),
+    )
+    changes, conflicts = plan(Vault.load(root))
+    assert changes == []
+    assert [(c.note_id, c.message) for c in conflicts] == [
+        ("ADR-20261001-self", "ADR-20261001-self claims to supersede itself")
+    ]
+
+
+def test_conflict_grammar_for_types_starting_with_a_vowel(tmp_path: Path) -> None:
+    root = make_vault(tmp_path)
+    write(root, "ideas/inbox/IDEA-20261001-x.md", note_text("IDEA-20261001-x", "idea"))
+    write(
+        root,
+        "decisions/ADR-20261002-b.md",
+        note_text("ADR-20261002-b", "decision", supersedes="IDEA-20261001-x"),
+    )
+    _, conflicts = plan(Vault.load(root))
+    assert conflicts[0].message == "IDEA-20261001-x is an idea and cannot be superseded"
+
+
+def test_apply_reports_a_failed_write_and_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import labbrain.sync as sync_module
+
+    real = sync_module.update_frontmatter
+
+    def flaky(path: Path, updates: dict) -> bool:
+        if path.name.startswith("ADR-20261001-a"):
+            raise ValueError(f"{path.name}: frontmatter cannot be updated (line 3)")
+        return real(path, updates)
+
+    monkeypatch.setattr(sync_module, "update_frontmatter", flaky)
+    root = make_vault(tmp_path)
+    for old, new in (("a", "c"), ("b", "d")):
+        write(
+            root,
+            f"decisions/ADR-20261001-{old}.md",
+            note_text(f"ADR-20261001-{old}", "decision", status="accepted"),
+        )
+        write(
+            root,
+            f"decisions/ADR-20261002-{new}.md",
+            note_text(f"ADR-20261002-{new}", "decision", supersedes=f"ADR-20261001-{old}"),
+        )
+    vault = Vault.load(root)
+    written, failed = apply(vault, plan(vault)[0], TODAY)
+    assert written == ["decisions/ADR-20261001-b.md"]
+    assert [(c.note_id, c.rel, c.message) for c in failed] == [
+        (
+            "ADR-20261001-a",
+            "decisions/ADR-20261001-a.md",
+            "could not write: ADR-20261001-a.md: frontmatter cannot be updated (line 3)",
+        )
+    ]

@@ -1,7 +1,9 @@
 """Derived state the tool maintains: supersession links and protocol freezing.
 
-Idempotent, and it only performs transitions that frozen-edit allows, so its
-output never trips frozen-edit.
+Idempotent. It only performs transitions that frozen-edit allows and writes only
+the fields it changes (plus `updated`), keeping every other line as it was, so its
+output never trips frozen-edit. Conflict messages print an existing superseded_by
+value only through findings.display_id.
 """
 
 from __future__ import annotations
@@ -21,6 +23,10 @@ def _supersedable(note_type: str | None) -> bool:
     """Only types whose schema has a superseded_by field (and so a superseded status)."""
     model = MODELS.get(note_type) if note_type is not None else None
     return model is not None and "superseded_by" in model.model_fields
+
+
+def _with_article(word: str) -> str:
+    return f"{'an' if word[:1] in 'aeiou' else 'a'} {word}"
 
 
 @dataclass(frozen=True)
@@ -51,8 +57,12 @@ def plan(vault: Vault) -> tuple[list[Change], list[Conflict]]:
         old = vault.get(old_id)
         if old is None:
             continue  # broken-link reports it
+        if old_id in successors[old_id]:
+            message = f"{old_id} claims to supersede itself"
+            conflicts.append(Conflict(old_id, old.rel, message))
+            continue
         if not _supersedable(old.type):
-            kind = f"a {old.type}" if old.type in MODELS else "of no known type"
+            kind = _with_article(old.type) if old.type in MODELS else "of no known type"
             message = f"{old_id} is {kind} and cannot be superseded"
             conflicts.append(Conflict(old_id, old.rel, message))
             continue
@@ -101,9 +111,25 @@ def plan(vault: Vault) -> tuple[list[Change], list[Conflict]]:
     return changes, conflicts
 
 
-def apply(vault: Vault, changes: list[Change], today: date) -> list[str]:
-    written = []
+def apply(vault: Vault, changes: list[Change], today: date) -> tuple[list[str], list[Conflict]]:
+    """Write each change; returns (paths written, changes that could not be written).
+
+    A failed write never stops the run: the remaining changes are still applied.
+    """
+    written: list[str] = []
+    failed: list[Conflict] = []
     for change in changes:
-        if update_frontmatter(vault.root / change.rel, {**change.updates, "updated": today}):
+        try:
+            changed = update_frontmatter(
+                vault.root / change.rel, {**change.updates, "updated": today}
+            )
+        except ValueError as exc:  # names only the file and a line
+            failed.append(Conflict(change.note_id, change.rel, f"could not write: {exc}"))
+            continue
+        except OSError:
+            message = "could not write: file could not be written"
+            failed.append(Conflict(change.note_id, change.rel, message))
+            continue
+        if changed:
             written.append(change.rel)
-    return written
+    return written, failed

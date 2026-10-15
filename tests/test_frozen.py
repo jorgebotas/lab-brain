@@ -68,7 +68,7 @@ def test_sync_keeps_untouched_yaml11_scalars_verbatim(vault_dir: Path) -> None:
         "dirty-code"
     ]
     vault = Vault.load(vault_dir)
-    assert apply(vault, plan(vault)[0], TODAY) == [BASELINE]
+    assert apply(vault, plan(vault)[0], TODAY) == ([BASELINE], [])
     after = (vault_dir / BASELINE).read_text()
     for line in ("dirty: yes}\n", "started: 12:30\n", "reviewed: no\n"):
         assert line in after

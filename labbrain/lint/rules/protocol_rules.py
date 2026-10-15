@@ -12,6 +12,7 @@ from collections.abc import Iterator
 from labbrain.findings import ERROR, WARNING, Finding
 from labbrain.lint import LintContext, rule
 from labbrain.notes import Note
+from labbrain.sync import plan as sync_plan
 from labbrain.vault import Vault
 
 STALE_EVIDENCE = frozenset({"superseded", "failed"})
@@ -87,3 +88,14 @@ def duplicate_config(ctx: LintContext) -> Iterator[Finding]:
             if others:
                 message = f"same config_hash and protocol as {', '.join(others)}"
                 yield Finding(exp.rel, 1, "duplicate-config", WARNING, message)
+
+
+@rule("sync-pending", WARNING, "`labbrain sync` would change something; conflicts are errors")
+def sync_pending(ctx: LintContext) -> Iterator[Finding]:
+    changes, conflicts = sync_plan(ctx.vault)
+    for change in changes:
+        fields = ", ".join(f"{key} → {value}" for key, value in change.updates.items())
+        message = f"run `labbrain sync`: {fields} ({change.reason})"
+        yield Finding(change.rel, 1, "sync-pending", WARNING, message)
+    for conflict in conflicts:
+        yield Finding(conflict.rel, 1, "sync-pending", ERROR, conflict.message)

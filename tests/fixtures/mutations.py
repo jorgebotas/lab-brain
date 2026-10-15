@@ -160,3 +160,25 @@ def duplicate_config(vault: Path) -> None:
         'config_hash: "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"',
         'config_hash: "sha256:3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b"',
     )
+
+
+# --- sync-pending ------------------------------------------------------------------
+
+
+@mutation("sync-pending")
+def sync_pending_supersession(vault: Path) -> None:
+    """label-smoothing now supersedes the baseline but sync has not run: the baseline is
+    still `done`, so claim-stale stays quiet, and the two config hashes differ."""
+    replace(
+        vault,
+        SMOOTHING,
+        "links: [EXP-20260901-baseline]",
+        "links: [EXP-20260901-baseline]\nsupersedes: EXP-20260901-baseline",
+    )
+
+
+@mutation("sync-pending")
+def sync_pending_protocol(vault: Path) -> None:
+    """EVAL-v2 is `draft` although done experiments reference it (committed, so no
+    frozen-edit)."""
+    replace(vault, EVAL_V2, "status: frozen", "status: draft")

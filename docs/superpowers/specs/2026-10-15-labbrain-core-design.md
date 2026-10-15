@@ -128,18 +128,18 @@ Notes are keyed by **filename stem**, not by the `id` field, so a note whose `id
 One parse pass builds:
 - `notes: dict[id, Note]`, `by_type: dict[type, list[Note]]`
 - `outbound: dict[id, set[id]]` and `inbound: dict[id, set[id]]`
-- `parse_errors: list[Finding]` (a bad note never aborts the load)
+- per-note `Note.errors` (a bad or unreadable note never aborts the load; `lint` and `validate` turn them into `schema` findings). *(Amended: there is no `Vault.parse_errors`.)*
 
 Links are harvested from body wikilinks (`[[ID]]`, `[[ID|text]]`, `[[ID\|text]]`, `[[ID#heading]]`, `[[ID^block]]`), ignoring fenced code blocks and inline code, and from every ID-bearing frontmatter field: `links`, `evidence`, `sources`, `protocol`, `dataset`, `supersedes`, `superseded_by`, `consolidated_into`, `split_of`, `changes_from`, `comparable_with`.
 
-- **Path targets.** A wikilink or embed (`![[...]]`) whose target contains `/` or ends in a file extension (e.g. `![[raw/papers/x.pdf]]`, `[[figures/roc.png]]`) is a vault-relative path, resolved against the filesystem, not the ID map. It does not count toward `orphan`.
+- **Path targets.** A wikilink or embed (`![[...]]`) whose target contains `/` or ends in a file extension (e.g. `![[raw/papers/x.pdf]]`, `[[figures/roc.png]]`) is a vault-relative path, resolved against the filesystem, not the ID map. It does not count toward `orphan`. A **folder-qualified note link** (`[[decisions/ADR-…]]`) contains `/`, so it is a path too: it resolves only if that exact file exists, and the bare ID is the supported way to link a note. Frontmatter values always resolve as note IDs, never as paths. *(Amended.)*
 - **Links survive model failure.** If the YAML parses but the model rejects it, links are still harvested from the raw frontmatter dict, so one bad field never makes other notes look orphaned. If the YAML itself is invalid, body wikilinks are still harvested. A note that fails to parse still registers its filename stem, so links *to* it do not break.
 - Self-links are ignored.
 
 ### Reading and writing
 
 - **Reads** use PyYAML's libyaml-backed safe loader (`CSafeLoader`, falling back to `SafeLoader`). Measured on 3,000 experiment frontmatters: PyYAML 0.47 s; ruamel `safe` 6.0 s (ruamel 0.19 no longer installs its C extension); ruamel round-trip 8.1 s. pydantic validates the resulting plain dict.
-- **Writes** re-load the file in ruamel round-trip mode, mutate the `CommentedMap`, and dump with `indent(mapping=2, sequence=4, offset=2)` (Obsidian's property style), so key order, comments and quoting survive. `None` dumps as an empty value (`key:`), matching Obsidian. The body is passed through byte-for-byte.
+- **Writes** re-load the file in ruamel round-trip mode, mutate the `CommentedMap`, and dump with `indent(mapping=2, sequence=4, offset=2)` (Obsidian's property style), so key order, comments and quoting survive. A string the tool writes that YAML 1.1 would read as another type (`yes`, `no`, `12:30`, a date) is single-quoted; values loaded from the file and not changed are written back exactly as they were. `None` dumps as an empty value (`key:`), matching Obsidian. The body is passed through byte-for-byte.
 - Writes go to a temp file in the same directory, then `os.replace`. No locking (one writer per working tree assumed).
 - Tool edits set `updated` to today.
 
@@ -247,7 +247,7 @@ Each condition is owned by exactly one rule, so each broken fixture can trigger 
 |---|---|---|
 | `schema` | error | Parse errors; model validation; ID format; `id` = filename; author membership; duplicate IDs; frontmatter-less file in a note folder; experiment `dataset` missing when `done`; concept `sources` key missing |
 | `missing-section` | warning | Required H2s per type; `## For future agents` (≤3 lines) on agent-authored notes |
-| `broken-link` | error | Every body wikilink and ID-bearing frontmatter value resolves to a note |
+| `broken-link` | error | Every body wikilink and ID-bearing frontmatter value resolves to a note. An unresolved target is printed only if it is a valid ID for a configured type with nothing identifier-like in it; otherwise a placeholder |
 | `frozen-edit` | error | See below |
 | `protocol-missing` | error | Experiment `status: done` with no `protocol` |
 | `cross-protocol` | error | For each claim: every `evidence` experiment's `protocol` is comparable with the claim's `protocol` |
@@ -287,7 +287,7 @@ For a frozen note:
 - **Deletion**: a frozen note present at base whose ID no longer exists anywhere in the working tree is an error.
 - **`raw/`**: any file present at base must be byte-identical and not deleted.
 
-Pre-commit compares against `HEAD` (the pre-commit framework stashes unstaged changes, so the working tree equals the staged tree). CI passes `--base <merge-base>` so commits made with `--no-verify` are still caught. Not a git repo, or `--base` does not resolve → one `info` finding and the rule is skipped.
+Pre-commit compares against `HEAD` (the pre-commit framework stashes unstaged changes, so the working tree equals the staged tree). CI passes `--base <merge-base>` so commits made with `--no-verify` are still caught. With the default base, not a git repo or no commits yet → one `info` finding and the rule is skipped. *(Amended: base strictness.)* A `--base` the user names must resolve: if it does not, or the vault is not in a git repository, `lint` exits 2 (and `lint.run(base=…)` used as a library reports an `error`). Any git failure other than "no such revision" is an `error` finding, never a skip.
 
 **Implementation constraints:**
 - **Diff-driven.** Only files reported by `git diff --name-status --no-renames <base> -- <vault>` can violate the rule; unchanged notes are never read from git. A `D` entry is a deletion unless its ID exists elsewhere in the working tree (a move); a moved note is then compared against its base blob.
@@ -304,18 +304,18 @@ Applies to agent-authored **concept** and **claim** notes only (experiments are 
 
 | Rule | Detects (default) |
 |---|---|
-| `phi-mrn` | 6–12 digit run within 30 chars of *MRN, medical record, record no, patient id, chart*; regex overridable via `phi.mrn_regex` |
+| `phi-mrn` | 6–12 digit run within 30 chars of *MRN, medical record, record no, patient id, chart* (plurals included); regex overridable via `phi.mrn_regex` |
 | `phi-date` | Full date within 30 chars of *DOB, born, birth, admitted, discharged, date of service, visit* |
 | `phi-phone` | NANP and E.164 formats with separators |
 | `phi-email` | Email addresses |
 | `phi-ssn` | `NNN-NN-NNNN` |
 | `phi-address` | House number + name + street suffix (St, Ave, Rd, Blvd, Ln, Dr, …) |
 | `phi-name` | Case-insensitive whole-word matches from the gitignored denylist file, if present |
-| `phi-small-cell` | Table cells in a column headed n / N / count / patients / subjects with integer 1…`min_cell_size − 1`; inline `n = 5`, `N=5`, `5 patients` / `5 subjects` in that range. `<11`-style suppressed values pass. |
+| `phi-small-cell` | Table cells in a column headed n / N / count / patients / subjects (also `n (%)`, `No. of patients`, `Number of subjects`, `n patients`, `Patients, n (%)`; not a bare `No.`) with integer 1…`min_cell_size − 1`; inline `n = 5`, `N=5`, `5 patients` / `5 subjects` in that range. `<11`-style suppressed values pass. |
 
 **Small-cell exemption for ML units.** ML notes say "n = 3 seeds" or "N=5 folds" constantly. An inline `n = k` immediately followed by a non-person unit (seeds, runs, folds, splits, epochs, layers, heads, models, trials, replicates, GPUs, nodes, steps, batches, tokens, classes, tasks, checkpoints, iterations, configs, sweeps). "samples" is deliberately **not** exempt: in clinical work it often means patients' samples is not flagged. A bare `n = 5`, or one followed by a person word, is flagged; that errs toward false positives, as the parent spec requires. Table columns headed `n` are always checked; a column of seed counts belongs under a header like `seeds`.
 
-Scope: every text file in the vault except `scratch/`, any dot-directory (`.git/`, `.labbrain/`, `.obsidian/`, `.claude/`: config, hashes and tool state, not prose), `__pycache__/`, `index.md` and binary files (null byte in the first 8 KB, or `raw/**/*.pdf`). Manuscripts **are** scanned.
+Scope: every text file in the vault except `scratch/`, any dot-directory (`.git/`, `.labbrain/`, `.obsidian/`, `.claude/`: config, hashes and tool state, not prose), `__pycache__/`, the vault-root `index.md` and binary files. Manuscripts **are** scanned. *(Amended: UTF-16.)* A byte-order mark selects UTF-8, UTF-16 or UTF-32; without one, a null byte in the first 8 KB means binary unless the code units look like BOM-less UTF-16/32 ASCII text. PDFs are always binary. A file with a text suffix (`.md`, `.txt`, `.csv`, …) that still cannot be decoded is an error finding, not a skip. An `index.md` below the root (or outside a vault) is ordinary text and is scanned.
 
 ### Output never contains matched text
 
@@ -328,7 +328,7 @@ Findings render as `path:line:col rule (span: N chars)`, with **no line text at 
    author: alice, date: 2026-10-15, reason: "version string, not a phone number"}
 ```
 
-Matched by `file + rule + sha256(line with surrounding whitespace stripped)`. Survives edits elsewhere in the file; forces re-review when the line itself changes; whole-line hashes are not practically reversible, unlike a hash of a short identifier. `line_hint` is informational only. (Deviation from the parent spec's `file:line:rule`; ADR.)
+Matched by `file + rule + sha256(line with surrounding whitespace stripped)`. Survives edits elsewhere in the file; forces re-review when the line itself changes. The hash is an unsalted key, not a secret: a short or predictable line can be brute-forced, so the allowlist needs the same care as the notes. *(Amended.)* `line_hint` is informational only. (Deviation from the parent spec's `file:line:rule`; ADR.)
 
 ### Error-message sanitization
 
@@ -336,7 +336,7 @@ Validation errors are a second leak path, because the PostToolUse validator feed
 - pydantic errors are rendered from `errors(include_input=False, include_url=False)` as `loc: msg`.
 - ruamel parse errors are reduced to `frontmatter is not valid YAML (line N)`.
 - Custom validators never interpolate field values into messages.
-- `findings.sanitize()` is applied to every message before output.
+- `findings.sanitize()` is applied to every message before output. It strips C0/C1 controls and bidi overrides, and redacts emails, SSN and phone shapes, and runs of six or more digits even next to a hyphen or underscore (only an ID's YYYYMMDD date stamp is kept).
 
 ## 9. Testing
 
@@ -434,3 +434,8 @@ Recorded as eight grouped ADRs (layout; lint rule set; frozen-edit; PHI; CLI and
   - Added `layout.py`, `validate.py` and `__main__.py`.
   - ADRs grouped into eight files.
   - Reads switched from ruamel `safe` to PyYAML `CSafeLoader` after benchmarking (adds `pyyaml>=6`).
+- 2026-10-15: Final-review amendments.
+  - Base strictness: only the default `HEAD` may be skipped (no repo, no commits); a named `--base` that does not resolve exits 2, and other git failures are errors.
+  - UTF-16/32: BOMs and BOM-less wide ASCII are decoded and scanned; undecodable text-suffixed files are errors; `index.md` is skipped only at the vault root.
+  - `Vault.parse_errors` removed from the design: per-note `Note.errors` become `schema` findings.
+  - Folder-qualified note links are paths (resolve only if the exact file exists); unresolved targets are echoed only as valid IDs for a configured type with nothing identifier-like.

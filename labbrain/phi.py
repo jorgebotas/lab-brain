@@ -3,7 +3,12 @@
 Hits carry position and span length only, never text: an unmatched part of a
 line may still hold an identifier the patterns missed, so no line content is
 ever printed. Allowlist entries are keyed by a hash of the whole line, which
-survives edits elsewhere in the file and is not practically reversible.
+survives edits elsewhere in the file and forces re-review when the line changes.
+
+The hash is a key, not a secret: it is unsalted, so a short or predictable line
+(say, a lone identifier with a context word) can be recovered by brute force. The
+allowlist lives in the vault next to the notes it describes, so it must be treated
+with the same care as they are.
 """
 
 from __future__ import annotations
@@ -101,6 +106,8 @@ class PhiHit:
 
 
 def line_hash(line: str) -> str:
+    """First 16 hex digits of the SHA-256 of the stripped line (an allowlist key, not a
+    secret: short lines can be brute-forced)."""
     return hashlib.sha256(line.strip().encode("utf-8")).hexdigest()[:16]
 
 

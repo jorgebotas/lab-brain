@@ -8,6 +8,7 @@ survives edits elsewhere in the file and is not practically reversible.
 
 from __future__ import annotations
 
+import codecs
 import hashlib
 import os
 import re
@@ -242,30 +243,86 @@ def scan_text(text: str, settings: ScanSettings) -> list[PhiHit]:
 
 
 _SNIFF_BYTES = 8192
+# Checked in this order: the UTF-32-LE BOM starts with the UTF-16-LE one.
+_BOMS: tuple[tuple[bytes, str], ...] = (
+    (codecs.BOM_UTF32_LE, "utf-32-le"),
+    (codecs.BOM_UTF32_BE, "utf-32-be"),
+    (codecs.BOM_UTF8, "utf-8"),
+    (codecs.BOM_UTF16_LE, "utf-16-le"),
+    (codecs.BOM_UTF16_BE, "utf-16-be"),
+)
+# BOM-less UTF-16/32 of mostly ASCII text: (codec, code unit width, offset of the
+# byte that carries the character; the unit's other bytes are NUL).
+_WIDE_CODECS: tuple[tuple[str, int, int], ...] = (
+    ("utf-32-le", 4, 0),
+    ("utf-32-be", 4, 3),
+    ("utf-16-le", 2, 0),
+    ("utf-16-be", 2, 1),
+)
+# Files with these suffixes are meant to be text: if their bytes cannot be decoded
+# they are reported, not skipped as binary.
+TEXT_SUFFIXES: frozenset[str] = frozenset(
+    {
+        ".md", ".markdown", ".txt", ".text", ".csv", ".tsv", ".json", ".jsonl", ".yaml",
+        ".yml", ".tex", ".bib", ".rst", ".html", ".htm", ".xml", ".log", ".ipynb",
+    }
+)  # fmt: skip
+UNDECODABLE = "text file is not in a readable encoding"
 
 
 def _is_pdf(path: Path) -> bool:
     return path.suffix.lower() == ".pdf"
 
 
+def _mostly_wide(head: bytes, width: int, offset: int) -> bool:
+    units = [head[i : i + width] for i in range(0, len(head) - width + 1, width)]
+    if len(units) < 2:
+        return False
+    ascii_like = sum(
+        1
+        for unit in units
+        if unit[offset] and not any(b for k, b in enumerate(unit) if k != offset)
+    )
+    return ascii_like >= 0.9 * len(units)
+
+
+def _text_codec(head: bytes) -> tuple[str, int] | None:
+    """(codec, BOM length) for a file starting with `head`; None if it is binary.
+
+    A BOM names the codec. Without one, a file with no NUL in `head` is UTF-8, and a
+    file with NULs is UTF-16/32 only if its code units look like encoded ASCII.
+    """
+    for bom, codec in _BOMS:
+        if head.startswith(bom):
+            return codec, len(bom)
+    if b"\0" not in head:
+        return "utf-8", 0
+    for codec, width, offset in _WIDE_CODECS:
+        if _mostly_wide(head, width, offset):
+            return codec, 0
+    return None
+
+
 def is_binary(path: Path) -> bool:
     if _is_pdf(path):
         return True
     with path.open("rb") as handle:
-        return b"\0" in handle.read(_SNIFF_BYTES)
+        return _text_codec(handle.read(_SNIFF_BYTES)) is None
 
 
 def _read_text(path: Path) -> str | None:
-    """Decoded text, or None for a binary file. One open: the first 8 KB decide
-    binary, and a binary file is never read past them. Raises OSError."""
+    """Decoded text, or None for a binary file. One open: the first 8 KB decide the
+    encoding (or binary), and a binary file is never read past them. Raises OSError."""
     if _is_pdf(path):
         return None
     with path.open("rb") as handle:
         head = handle.read(_SNIFF_BYTES)
-        if b"\0" in head:
+        found = _text_codec(head)
+        if found is None:
             return None
         data = head + handle.read()
-    return data.decode("utf-8", errors="replace")
+    codec, skip = found
+    return data[skip:].decode(codec, errors="replace")
 
 
 def in_scan_scope(rel: str) -> bool:
@@ -474,6 +531,9 @@ def scan(
                 findings.append(Finding(rel, 0, rule_name or UNREADABLE_RULE, ERROR, problem))
                 continue
             if text is None:
+                if path.suffix.lower() in TEXT_SUFFIXES:
+                    rule = rule_name or UNREADABLE_RULE
+                    findings.append(Finding(rel, 0, rule, ERROR, UNDECODABLE))
                 continue
             for hit in scan_text(text, settings):
                 if (rel, hit.rule, hit.line_sha) in allow:

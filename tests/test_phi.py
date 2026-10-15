@@ -453,7 +453,11 @@ def test_pre_read_texts_give_identical_findings(vault_dir: Path) -> None:
         "rule_name": "phi",
     }
     from_disk = scan([vault.root], **kwargs)
-    assert len(from_disk) == 3
+    assert len(from_disk) == 4
+    # A .md file with a NUL that is not UTF-16/32 cannot be decoded: reported, not skipped.
+    assert ("concepts/nul.md", "text file is not in a readable encoding") in {
+        (f.path, f.message) for f in from_disk
+    }
     assert scan([vault.root], texts=_vault_texts(vault), **kwargs) == from_disk
 
 
@@ -472,3 +476,57 @@ def test_unreadable_allowlist_is_an_allowlist_error_without_content(tmp_path: Pa
         load_allowlist(root)
     assert "sentinelvalue" not in str(info.value)
     assert info.value.__cause__ is None and info.value.__suppress_context__
+
+
+ENCODED = [
+    ("utf-16", "utf-16"),  # BOM, native order
+    ("utf-16-be-bom", "utf-16-be"),
+    ("utf-32", "utf-32"),  # BOM
+    ("utf-16-le-no-bom", "utf-16-le"),
+    ("utf-16-be-no-bom", "utf-16-be"),
+    ("utf-32-le-no-bom", "utf-32-le"),
+    ("utf-8-bom", "utf-8-sig"),
+]
+
+
+def _encode(text: str, kind: str, codec: str) -> bytes:
+    if kind == "utf-16-be-bom":
+        return b"\xfe\xff" + text.encode("utf-16-be")
+    return text.encode(codec)
+
+
+@pytest.mark.parametrize(("kind", "codec"), ENCODED, ids=[k for k, _ in ENCODED])
+def test_utf16_and_utf32_text_is_scanned(tmp_path: Path, kind: str, codec: str) -> None:
+    value = phone()
+    line = f"Call {value} for access."
+    root = make_vault(tmp_path)
+    path = root / "manuscripts" / "notes.txt"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(_encode(f"intro\n{line}\n", kind, codec))
+    findings = scan([root], root=root, settings=ScanSettings(), allow=frozenset())
+    assert [(f.path, f.rule, f.line, f.col) for f in findings] == [
+        ("manuscripts/notes.txt", "phi-phone", 2, line.index(value) + 1)
+    ]
+    assert value not in render(findings, "json")
+
+
+def test_utf16_note_is_scanned_by_lint_and_validate(tmp_path: Path) -> None:
+    root = make_vault(tmp_path, MIN_CONFIG + "protected_data: true\n")
+    note = root / "concepts" / "wide.md"
+    note.parent.mkdir(parents=True)
+    note.write_bytes(f"Call {phone()} today.\n".encode("utf-16"))
+    assert "phi" in {f.rule for f in lint.run(Vault.load(root), today=TODAY, only=["phi"])}
+    assert "phi" in {f.rule for f in validate_path(note)}
+
+
+def test_text_file_with_unrecognised_nul_bytes_is_reported(tmp_path: Path) -> None:
+    root = make_vault(tmp_path)
+    write(root, "concepts/ok.md", "Fine.\n")
+    blob = b"\x89X" + bytes(RNG.randrange(256) for _ in range(64)) + b"\x00\x00\x07"
+    (root / "manuscripts").mkdir()
+    (root / "manuscripts" / "table.csv").write_bytes(blob)
+    (root / "manuscripts" / "figure.png").write_bytes(blob)
+    findings = scan([root], root=root, settings=ScanSettings(), allow=frozenset())
+    assert [(f.path, f.rule, f.message) for f in findings] == [
+        ("manuscripts/table.csv", "phi-unreadable", "text file is not in a readable encoding")
+    ]

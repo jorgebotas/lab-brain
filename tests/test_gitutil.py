@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -59,3 +60,24 @@ def test_open_repo_canonicalises_a_mis_cased_vault_path(tmp_path: Path) -> None:
     assert base is not None
     (repo_dir / "brain" / "notes" / "a.md").write_text("one changed\n")
     assert gitutil.changed_files(repo, base) == [("M", "notes/a.md")]
+
+
+def test_resolve_ref_is_none_only_for_an_unknown_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_dir = make_repo(tmp_path)
+    repo = gitutil.open_repo(repo_dir)
+    assert repo is not None
+    assert gitutil.resolve_ref(repo, "no-such-ref") is None
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    git(empty, "init", "-q", "-b", "main")
+    empty_repo = gitutil.open_repo(empty)
+    assert empty_repo is not None and gitutil.resolve_ref(empty_repo, "HEAD") is None
+
+    def corrupt(*args: object, **kwargs: object) -> object:
+        raise subprocess.CalledProcessError(128, ["git"], output=b"", stderr=b"fatal: corrupt")
+
+    monkeypatch.setattr(gitutil.subprocess, "run", corrupt)
+    with pytest.raises(gitutil.GitError):
+        gitutil.resolve_ref(repo, "HEAD")

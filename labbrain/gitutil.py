@@ -13,7 +13,11 @@ from pathlib import Path
 
 
 class GitError(Exception):
-    """A git command failed."""
+    """A git command failed. `returncode` is git's exit status, None if git did not run."""
+
+    def __init__(self, message: str, returncode: int | None = None) -> None:
+        super().__init__(message)
+        self.returncode = returncode
 
 
 @dataclass(frozen=True)
@@ -26,7 +30,9 @@ class Repo:
             proc = subprocess.run(
                 ["git", "-C", str(self.top), *args], input=input, capture_output=True, check=True
             )
-        except (OSError, subprocess.CalledProcessError) as exc:
+        except subprocess.CalledProcessError as exc:
+            raise GitError(f"git {args[0]} failed", exc.returncode) from exc
+        except OSError as exc:
             raise GitError(f"git {args[0]} failed") from exc
         return proc.stdout
 
@@ -60,11 +66,23 @@ def open_repo(vault_root: Path) -> Repo | None:
 
 
 def resolve_ref(repo: Repo, ref: str) -> str | None:
+    """The commit SHA `ref` names, or None if it names no commit (including HEAD in a
+    repository without commits). Any other git failure raises GitError."""
     try:
         sha = repo.git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}").decode().strip()
-    except GitError:
-        return None
+    except GitError as exc:
+        # --verify --quiet exits 1, silently, exactly when the revision does not resolve.
+        if exc.returncode == 1 and not _stderr(exc):
+            return None
+        raise
     return sha or None
+
+
+def _stderr(exc: GitError) -> bytes:
+    cause = exc.__cause__
+    if isinstance(cause, subprocess.CalledProcessError):
+        return cause.stderr or b""
+    return b""
 
 
 def changed_files(repo: Repo, base: str) -> list[tuple[str, str]]:

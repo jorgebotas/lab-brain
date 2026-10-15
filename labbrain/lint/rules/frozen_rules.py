@@ -158,17 +158,25 @@ def _compare(base: Note, current: Note, policy: Policy) -> Iterator[Finding]:
 
 @rule(RULE, ERROR, "Frozen notes changed outside allowed fields, deleted, or raw/ files edited")
 def frozen_edit(ctx: LintContext) -> Iterator[Finding]:
+    # A base the caller named must be honoured; only the default HEAD may be skipped
+    # (no repository, or a repository without commits).
+    skipped = ERROR if ctx.base_explicit else INFO
     repo = gitutil.open_repo(ctx.vault.root)
     if repo is None:
-        yield Finding("", 0, RULE, INFO, "not a git repository; frozen-edit skipped")
-        return
-    base = gitutil.resolve_ref(repo, ctx.base)
-    if base is None:
-        message = f"base revision {ctx.base} not found; frozen-edit skipped"
-        yield Finding("", 0, RULE, INFO, message)
+        if ctx.base_explicit:
+            message = "not a git repository, so --base cannot be used; frozen-edit could not run"
+        else:
+            message = "not a git repository; frozen-edit skipped"
+        yield Finding("", 0, RULE, skipped, message)
         return
     try:
-        findings = list(_check(ctx, repo, base))
+        base = gitutil.resolve_ref(repo, ctx.base)
+        if base is None:
+            outcome = "could not run" if ctx.base_explicit else "skipped"
+            message = f"base revision {ctx.base} not found; frozen-edit {outcome}"
+            findings = [Finding("", 0, RULE, skipped, message)]
+        else:
+            findings = list(_check(ctx, repo, base))
     except gitutil.GitError:
         message = "git failed while checking frozen notes; frozen-edit could not run"
         findings = [Finding("", 0, RULE, ERROR, message)]

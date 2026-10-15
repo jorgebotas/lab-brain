@@ -18,13 +18,18 @@ from labbrain.findings import Finding, sort_findings
 from labbrain.vault import Vault
 from labbrain.vault import today as _today
 
+DEFAULT_BASE = "HEAD"
+
 
 @dataclass
 class LintContext:
     vault: Vault
     today: date
-    base: str = "HEAD"
+    base: str = DEFAULT_BASE
     cache: dict[str, Any] = field(default_factory=dict)
+    # True when the caller named the base: then it must resolve, or frozen-edit fails
+    # closed. The default HEAD may be missing (a repository without commits).
+    base_explicit: bool = False
 
 
 RuleFn = Callable[[LintContext], Iterable[Finding]]
@@ -74,15 +79,22 @@ def run(
     vault: Vault,
     *,
     today: date | None = None,
-    base: str = "HEAD",
+    base: str | None = None,
     only: Iterable[str] | None = None,
 ) -> list[Finding]:
+    """Run the selected rules (all by default). `base` is the git revision frozen-edit
+    compares against; None means HEAD, skipped with an info finding if it does not exist."""
     rules = load_rules()
     selected = set(only) if only else None
     if selected is not None and selected - set(rules):
         unknown = ", ".join(sorted(selected - set(rules)))
         raise UnknownRuleError(f"unknown lint rule(s): {unknown}")
-    ctx = LintContext(vault=vault, today=today or _today(), base=base)
+    ctx = LintContext(
+        vault=vault,
+        today=today or _today(),
+        base=DEFAULT_BASE if base is None else base,
+        base_explicit=base is not None,
+    )
     findings: list[Finding] = []
     for name in sorted(rules):
         if selected is None or name in selected:

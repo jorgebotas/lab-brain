@@ -14,7 +14,7 @@ from labbrain.sync import apply, plan
 from labbrain.vault import Vault
 
 
-def frozen(root: Path, base: str = "HEAD") -> list[tuple[str, str, str]]:
+def frozen(root: Path, base: str | None = None) -> list[tuple[str, str, str]]:
     findings = lint.run(Vault.load(root), today=TODAY, base=base, only=["frozen-edit"])
     return [(f.severity, f.path, f.message) for f in findings]
 
@@ -103,12 +103,35 @@ def test_base_option_catches_committed_violations(vault_dir: Path) -> None:
     assert [p for _, p, _ in frozen(vault_dir, base="HEAD~1")] == [BASELINE]
 
 
-def test_skipped_outside_git_and_for_unknown_base(tmp_path: Path, vault_dir: Path) -> None:
+def test_default_base_is_skipped_outside_git_and_in_an_empty_repo(tmp_path: Path) -> None:
     plain = tmp_path / "plain"
     shutil.copytree(FIXTURE, plain)
     assert frozen(plain) == [("info", "", "not a git repository; frozen-edit skipped")]
+    git(plain, "init", "-q", "-b", "main")
+    assert frozen(plain) == [("info", "", "base revision HEAD not found; frozen-edit skipped")]
+
+
+def test_explicit_base_that_cannot_be_resolved_is_an_error(tmp_path: Path, vault_dir: Path) -> None:
+    """A base the caller named must be honoured: failing to resolve it fails closed."""
     assert frozen(vault_dir, base="no-such-ref") == [
-        ("info", "", "base revision no-such-ref not found; frozen-edit skipped")
+        ("error", "", "base revision no-such-ref not found; frozen-edit could not run")
+    ]
+    plain = tmp_path / "plain"
+    shutil.copytree(FIXTURE, plain)
+    assert frozen(plain, base="HEAD") == [
+        ("error", "", "not a git repository, so --base cannot be used; frozen-edit could not run")
+    ]
+
+
+def test_git_failure_while_resolving_the_base_is_an_error(
+    vault_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(repo: gitutil.Repo, ref: str) -> str | None:
+        raise GitError("git rev-parse failed")
+
+    monkeypatch.setattr(gitutil, "resolve_ref", broken)
+    assert frozen(vault_dir) == [
+        ("error", "", "git failed while checking frozen notes; frozen-edit could not run")
     ]
 
 

@@ -241,10 +241,27 @@ def cmd_log(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _check_base(root: Path, base: str) -> None:
+    """A --base the user typed must name a commit; a git failure is left to frozen-edit."""
+    from labbrain import gitutil
+
+    repo = gitutil.open_repo(root)
+    if repo is None:
+        raise UsageError("--base needs the vault to be inside a git repository")
+    try:
+        found = gitutil.resolve_ref(repo, base)
+    except gitutil.GitError:
+        return
+    if found is None:
+        raise UsageError("--base does not name a commit in the vault's repository")
+
+
 def cmd_lint(args: argparse.Namespace) -> int:
     from labbrain import lint
 
     vault = _vault(args)
+    if args.base is not None:
+        _check_base(vault.root, args.base)
     try:
         findings = lint.run(vault, base=args.base, only=args.rule or None)
     except lint.UnknownRuleError as exc:
@@ -398,7 +415,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_log)
 
     p = add("lint", "run every lint rule over the vault")
-    p.add_argument("--base", default="HEAD", help="git revision frozen-edit compares against")
+    p.add_argument(
+        "--base",
+        default=None,
+        help="git revision frozen-edit compares against (default HEAD; a named base must exist)",
+    )
     p.add_argument("--rule", action="append", default=[], help="run only this rule (repeatable)")
     _add_format(p)
     p.set_defaults(func=cmd_lint)

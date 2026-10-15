@@ -317,3 +317,30 @@ def test_broken_pipe_keeps_the_exit_code_and_stays_quiet(vault_dir: Path) -> Non
         assert code == 0 and "Exception ignored" not in err and "Traceback" not in err, (args, err)
     code, err = _run_into_closed_pipe("index", "--check", read_first_line=False)
     assert code == 1 and "Exception ignored" not in err and "Traceback" not in err, err
+
+
+def test_lint_explicit_base_must_resolve(
+    vault_dir: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, err = run(capsys, "lint", "--base", "no-such-ref")
+    assert code == 2 and out == ""
+    assert "--base does not name a commit" in err
+    assert run(capsys, "lint", "--base", "HEAD")[0] == 0
+
+
+def test_lint_default_base_in_an_empty_repo_is_info(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    from helpers import FIXTURE, git
+
+    root = tmp_path / "fresh"
+    shutil.copytree(FIXTURE, root)
+    git(root, "init", "-q", "-b", "main")
+    monkeypatch.setenv("LABBRAIN_VAULT", str(root))
+    monkeypatch.setenv("LABBRAIN_NOW", "2026-10-15T12:00:00")
+    code, out, _ = run(capsys, "lint")
+    assert code == 0 and "base revision HEAD not found; frozen-edit skipped" in out
+    code, _, err = run(capsys, "lint", "--base", "HEAD")
+    assert code == 2 and "--base does not name a commit" in err

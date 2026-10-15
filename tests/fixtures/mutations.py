@@ -140,3 +140,41 @@ def index_stale_title(vault: Path) -> None:
         'title: "Label smoothing and calibration"',
         'title: "Label smoothing, calibration and confidence"',
     )
+
+
+# --- hygiene -------------------------------------------------------------------------
+
+
+@mutation("concept-unsourced")
+def concept_unsourced(vault: Path) -> None:
+    """Concept sources emptied. label-smoothing keeps inbound links from the concept body
+    and the handoff; the paper keeps the concept body and the decision."""
+    replace(
+        vault,
+        CONCEPT,
+        "sources: [EXP-20260910-label-smoothing, LIT-szegedy2016-rethinking]",
+        "sources: []",
+    )
+
+
+@mutation("inbox-age")
+def inbox_age(vault: Path) -> None:
+    """The open idea was created more than 30 days before the pinned date."""
+    replace(vault, IDEA_OPEN, "created: 2026-10-10", "created: 2026-08-01")
+
+
+@mutation("dirty-code")
+def dirty_code(vault: Path) -> None:
+    """The baseline was logged from a dirty tree."""
+    replace(vault, BASELINE, "dirty: false", "dirty: true")
+
+
+@mutation("undated-fact")
+def undated_fact(vault: Path) -> None:
+    """An agent-written concept quotes a number with no stamp; no PHI pattern matches."""
+    replace(
+        vault,
+        CONCEPT,
+        "which tends to improve calibration.\n",
+        "which tends to improve calibration.\n\nIn our runs calibration error dropped to 0.04.\n",
+    )

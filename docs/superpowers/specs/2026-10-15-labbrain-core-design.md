@@ -28,7 +28,7 @@ The parent spec is split into five sub-projects, each with its own spec → plan
 ```
 lab-brain/
   pyproject.toml            # uv-managed, hatchling build, Python >=3.11
-                            # deps: pydantic>=2, ruamel.yaml
+                            # deps: pydantic>=2, pyyaml>=6 (reads), ruamel.yaml (writes)
                             # dev: pytest, pytest-cov, ruff
                             # script: labbrain = labbrain.cli:main
   labbrain/
@@ -138,7 +138,7 @@ Links are harvested from body wikilinks (`[[ID]]`, `[[ID|text]]`, `[[ID\|text]]`
 
 ### Reading and writing
 
-- **Reads** use ruamel's `safe` loader (C-accelerated via `ruamel.yaml.clib`); round-trip loading costs ~3 ms per file and would break the 3 s lint budget at 3,000 notes. pydantic validates the resulting plain dict.
+- **Reads** use PyYAML's libyaml-backed safe loader (`CSafeLoader`, falling back to `SafeLoader`). Measured on 3,000 experiment frontmatters: PyYAML 0.47 s; ruamel `safe` 6.0 s (ruamel 0.19 no longer installs its C extension); ruamel round-trip 8.1 s. pydantic validates the resulting plain dict.
 - **Writes** re-load the file in ruamel round-trip mode, mutate the `CommentedMap`, and dump with `indent(mapping=2, sequence=4, offset=2)` (Obsidian's property style), so key order, comments and quoting survive. `None` dumps as an empty value (`key:`), matching Obsidian. The body is passed through byte-for-byte.
 - Writes go to a temp file in the same directory, then `os.replace`. No locking (one writer per working tree assumed).
 - Tool edits set `updated` to today.
@@ -433,3 +433,4 @@ Recorded as eight grouped ADRs (layout; lint rule set; frozen-edit; PHI; CLI and
   - phi-scan skips all dot-directories.
   - Added `layout.py`, `validate.py` and `__main__.py`.
   - ADRs grouped into eight files.
+  - Reads switched from ruamel `safe` to PyYAML `CSafeLoader` after benchmarking (adds `pyyaml>=6`).

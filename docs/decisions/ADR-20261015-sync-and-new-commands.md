@@ -22,7 +22,7 @@ The parent spec says "the tool" marks superseded notes and freezes protocols but
 
 labbrain sync is idempotent: it sets status and superseded_by on every note another note supersedes, and freezes draft protocols referenced by done experiments, using only transitions frozen-edit allows. Conflicting supersession is reported, never written. labbrain new mints an ID and writes a skeleton generated from the schema registries; every skeleton validates with zero findings.
 
-Skip and conflict rules: a supersedes target that does not resolve is skipped, because broken-link reports it. A target whose type has no superseded_by field in its schema cannot be superseded, and is a conflict rather than a write. Two notes superseding the same note, or a note already superseded by a different note, are conflicts. When a conflict message mentions an existing superseded_by value, the value is shown only if it names a note or is shaped like an ID; otherwise a placeholder is shown. Only a draft note of type protocol is frozen. Every write also sets updated to the current date taken from the engine's clock.
+Skip and conflict rules: a supersedes target that does not resolve is skipped, because broken-link reports it. A target whose type has no superseded_by field in its schema cannot be superseded, and is a conflict rather than a write. Two notes superseding the same note, or a note already superseded by a different note, are conflicts. When a conflict message mentions an existing superseded_by value, it goes through the shared display_id helper, so only an ID-shaped value is printed and anything else becomes a placeholder. Only a draft note of type protocol is frozen. Every write also sets updated to the current date taken from the engine's clock.
 
 ## Alternatives considered
 
@@ -30,4 +30,4 @@ Leaving propagation to skills; new-id only.
 
 ## Consequences
 
-sync-pending warns when sync was not run, and lint and sync share one plan, so whatever sync-pending flags is exactly what sync would change. Covers spec ADR items 9 and 10.
+sync-pending warns when sync was not run. Lint and sync share one plan: every sync-pending warning is a change sync would make, and its errors are the conflicts sync refuses to write. Covers spec ADR items 9 and 10.

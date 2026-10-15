@@ -55,3 +55,12 @@ def test_duplicate_config_ignores_supersession_pairs(vault_dir: Path) -> None:
         "links: [EXP-20260901-baseline]\nsupersedes: EXP-20260901-baseline",
     )
     assert fired(vault_dir, "duplicate-config") == []
+
+
+def test_cross_protocol_skips_dangling_protocols(vault_dir: Path) -> None:
+    """broken-link owns unresolved protocol IDs; cross-protocol must not echo them."""
+    replace(vault_dir, CLAIM, "protocol: EVAL-v2", "protocol: EVAL-v9 patient cohort")
+    assert fired(vault_dir, "cross-protocol") == []
+    replace(vault_dir, CLAIM, "protocol: EVAL-v9 patient cohort", "protocol: EVAL-v2")
+    replace(vault_dir, BASELINE, "protocol: EVAL-v2\n", "protocol: EVAL-v9 patient cohort\n")
+    assert fired(vault_dir, "cross-protocol") == []

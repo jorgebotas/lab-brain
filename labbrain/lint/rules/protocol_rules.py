@@ -39,14 +39,16 @@ def protocol_missing(ctx: LintContext) -> Iterator[Finding]:
 def cross_protocol(ctx: LintContext) -> Iterator[Finding]:
     for claim in ctx.vault.of_type("claim"):
         claim_protocol = claim.get_str("protocol")
-        if not claim_protocol:
-            continue
+        if not claim_protocol or ctx.vault.get(claim_protocol) is None:
+            continue  # broken-link reports an unresolved protocol
         for evidence_id in claim.get_list("evidence"):
             exp = ctx.vault.get(evidence_id)
             if exp is None or exp.type != "experiment":
                 continue
             exp_protocol = exp.get_str("protocol")
-            if exp_protocol and not comparable(claim_protocol, exp_protocol, ctx.vault):
+            if not exp_protocol or ctx.vault.get(exp_protocol) is None:
+                continue  # broken-link reports an unresolved protocol
+            if not comparable(claim_protocol, exp_protocol, ctx.vault):
                 message = (
                     f"evidence {evidence_id} uses {exp_protocol}, "
                     f"not comparable with the claim's {claim_protocol}"

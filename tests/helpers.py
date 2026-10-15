@@ -71,7 +71,7 @@ def git(cwd: Path, *args: str) -> str:
 
 def commit_all(cwd: Path, message: str = "fixture") -> None:
     git(cwd, "add", "-A")
-    git(cwd, "commit", "-q", "--allow-empty", "-m", message)
+    git(cwd, "commit", "-q", "--no-verify", "--allow-empty", "-m", message)
 
 
 def copy_fixture(dest: Path) -> Path:

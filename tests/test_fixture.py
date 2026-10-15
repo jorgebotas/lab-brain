@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
-from helpers import FIXTURE, git
+from helpers import FIXTURE, commit_all, git
 
 from labbrain.notes import dump_frontmatter, future_agents_block, rt_yaml, split_frontmatter
 from labbrain.vault import Vault
@@ -57,3 +60,29 @@ def test_fixture_frontmatter_round_trips_byte_for_byte() -> None:
 def test_vault_dir_is_a_clean_git_copy(vault_dir: Path) -> None:
     assert (vault_dir / ".git").is_dir()
     assert git(vault_dir, "status", "--porcelain") == ""
+
+
+def test_inherited_git_dir_cannot_redirect_the_vault_copy(tmp_path: Path) -> None:
+    """Regression: GIT_DIR exported by a hook or `rebase --exec` must not reach fixture repos."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    git(scratch, "init", "-q", "-b", "main")
+    commit_all(scratch, "scratch root")
+    env = {**os.environ, "GIT_DIR": str(scratch / ".git")}
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "tests/test_fixture.py::test_vault_dir_is_a_clean_git_copy",
+        ],
+        cwd=Path(__file__).parent.parent,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert git(scratch, "rev-list", "--count", "HEAD").strip() == "1"

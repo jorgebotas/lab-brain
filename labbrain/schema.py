@@ -265,9 +265,37 @@ DEFAULT_STATUS: dict[str, str] = {
 assert set(MODELS) == set(NOTE_TYPES)
 
 
+# Every declared field name; any other string in an error `loc` came from the input.
+_KNOWN_FIELDS: frozenset[str] = frozenset(
+    name
+    for model in (*MODELS.values(), BaseNote, Tracker, Code, Metric)
+    for name in model.model_fields
+)
+
+# Union-branch labels pydantic inserts into `loc` (parametrised ones contain "[").
+_TYPE_TAGS: frozenset[str] = frozenset(
+    {"str", "int", "float", "bool", "date", "datetime", "list", "dict", "none"}
+)
+
+
+def _render_loc(loc: tuple[int | str, ...]) -> str:
+    """Render an error location without echoing input: dict keys become `<key>`."""
+    parts: list[str] = []
+    for index, part in enumerate(loc):
+        next_part = loc[index + 1] if index + 1 < len(loc) else None
+        if isinstance(part, str) and part in _KNOWN_FIELDS:
+            parts.append(part)
+        elif isinstance(part, int) and not isinstance(part, bool) and next_part != "[key]":
+            parts.append(str(part))  # list index
+        elif isinstance(part, str) and (part in _TYPE_TAGS or "[" in part):
+            continue  # union-branch label, or the "[key]" marker after a dict key
+        else:
+            parts.append("<key>")
+    return ".".join(parts) or "frontmatter"
+
+
 def _format_error(error: Any) -> str:
-    loc = ".".join(str(part) for part in error["loc"]) or "frontmatter"
-    return f"{loc}: {error['msg'].removeprefix('Value error, ')}"
+    return f"{_render_loc(error['loc'])}: {error['msg'].removeprefix('Value error, ')}"
 
 
 def validate_frontmatter(data: dict[str, Any]) -> tuple[BaseNote | None, list[str]]:

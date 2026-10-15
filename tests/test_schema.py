@@ -124,3 +124,22 @@ def test_null_list_fields_become_empty() -> None:
 def test_json_schema_export() -> None:
     assert json_schema("experiment")["title"] == "ExperimentNote"
     assert "oneOf" in json_schema()
+
+
+def test_dict_key_never_rendered_in_loc() -> None:
+    _, errors = validate_frontmatter(common("dataset", counts={998877665: [1]}))
+    assert errors == ["counts.<key>: Input should be a valid string"]
+    assert all("998877665" not in error for error in errors)
+
+
+def test_union_type_tags_dropped_from_loc() -> None:
+    _, errors = validate_frontmatter(common("claim", value="not-a-number"))
+    assert errors
+    assert all(error.split(": ", 1)[0] == "value" for error in errors)
+
+
+def test_list_indices_and_nested_fields_kept_in_loc() -> None:
+    _, errors = validate_frontmatter(
+        common("experiment", tags=[1], metrics=[{"name": "auroc", "value": "x"}])
+    )
+    assert [error.split(": ", 1)[0] for error in errors] == ["tags.0", "metrics.0.value"]

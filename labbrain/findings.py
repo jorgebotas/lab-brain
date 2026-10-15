@@ -30,6 +30,7 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066
 # is redacted too (a prefixed record number, say), unless it is exactly an ID's date
 # stamp (eight digits reading as a 19xx/20xx calendar date, next to a hyphen).
 _DIGIT_RUN = re.compile(r"(?<![^\W_])\d{6,}(?![^\W_])")
+_ANY_DIGIT_RUN = re.compile(r"(?<!\d)\d{6,}(?!\d)")
 _SSN = re.compile(r"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)")
 _PHONE = re.compile(r"(?<!\d)(?:\+?1[\s.-])?(?:\(\d{3}\)\s?|\d{3}[.-])\d{3}[.-]\d{4}(?!\d)")
 _EMAIL = re.compile(r"[\w.%+-]+@[\w-]+(?:\.[\w-]+)+")
@@ -66,10 +67,13 @@ def _redact_digit_run(match: re.Match[str]) -> str:
 
 
 def _identifier_like(text: str) -> bool:
-    """True if `text` holds anything sanitize would redact (SSN, phone, digit run, email)."""
+    """True if `text` holds an SSN or phone shape, an email, or a run of six or more
+    digits other than an ID's date stamp. Stricter than sanitize, which spares digit
+    runs glued to letters: a value is echoed only when it holds no long run at all."""
     if _SSN.search(text) or _PHONE.search(text) or _EMAIL.search(text):
         return True
-    return any(not _is_id_date_stamp(text, m.start(), m.end()) for m in _DIGIT_RUN.finditer(text))
+    runs = _ANY_DIGIT_RUN.finditer(text)
+    return any(not _is_id_date_stamp(text, m.start(), m.end()) for m in runs)
 
 
 def _valid_for_some_type(target: str, prefixes: Mapping[str, str] | None) -> bool:

@@ -195,3 +195,11 @@ def test_renderers_strip_controls_from_path_and_rule() -> None:
         out = render([finding], fmt)
         assert not any(ch in out for ch in "\x1b\u202e"), fmt
         assert "ru\nle" not in out, fmt
+
+
+def test_display_id_hides_letter_adjacent_digit_runs() -> None:
+    """A concept slug may glue a long number to letters; display_id still hides it."""
+    rng = random.Random(43)
+    for value in (f"mrn{rng.randrange(10**7, 10**8)}", f"case-x{rng.randrange(10**6, 10**7)}"):
+        assert display_id(value) == NOT_AN_ID
+    assert display_id("resnet152-gpt4") == "resnet152-gpt4"

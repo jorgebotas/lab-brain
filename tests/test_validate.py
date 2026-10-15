@@ -3,10 +3,12 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+import pytest
 from fixtures.mutations import CONCEPT, IDEA_OPEN, replace
 
 from labbrain.layout import is_note_rel
 from labbrain.validate import validate_path, validate_paths
+from labbrain.vault import ENV_VAULT, VaultNotFound
 
 
 def note_paths(root: Path) -> list[Path]:
@@ -46,3 +48,31 @@ def test_broken_note_reports_schema_error(vault_dir: Path) -> None:
     replace(vault_dir, CONCEPT, "status: active", "status: archived")
     findings = validate_path(vault_dir / CONCEPT)
     assert [(f.rule, f.severity) for f in findings] == [("schema", "error")]
+
+
+def test_explicit_vault_without_config_raises(vault_dir: Path, tmp_path: Path) -> None:
+    bogus = tmp_path / "no-config"
+    bogus.mkdir()
+    with pytest.raises(VaultNotFound):
+        validate_path(vault_dir / CONCEPT, vault=bogus)
+
+
+def test_env_vault_without_config_raises(
+    vault_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bogus = tmp_path / "no-config"
+    bogus.mkdir()
+    monkeypatch.setenv(ENV_VAULT, str(bogus))
+    with pytest.raises(VaultNotFound):
+        validate_path(vault_dir / CONCEPT)
+
+
+def test_discovery_without_vault_is_info(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(ENV_VAULT, raising=False)
+    other = tmp_path / "loose" / "elsewhere.md"
+    other.parent.mkdir()
+    other.write_text("x\n")
+    findings = validate_path(other)
+    assert [(f.rule, f.severity, f.message) for f in findings] == [
+        ("validate", "info", "not inside a vault; skipped")
+    ]

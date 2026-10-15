@@ -167,6 +167,20 @@ def test_update_frontmatter_quotes_yaml11_non_strings(tmp_path: Path, title: str
     assert note.get("title") == title
 
 
+def test_update_frontmatter_leaves_loaded_yaml11_scalars_alone(tmp_path: Path) -> None:
+    """Only written values are quoted; untouched plain `no` / `12:30` keep their lines."""
+    path = tmp_path / "note.md"
+    original = SAMPLE.replace("status: running", "status: running\nreviewed: no\nstarted: 12:30")
+    path.write_text(original)
+    assert update_frontmatter(path, {"status": "done", "tags": ["yes", "fine"]}) is True
+    new = path.read_text()
+    assert "reviewed: no\nstarted: 12:30\n" in new
+    assert "status: done\n" in new
+    note = parse_note(path, tmp_path)
+    assert note.get("tags") == ["yes", "fine"]
+    assert note.get("reviewed") is False  # PyYAML's reading, unchanged by the write
+
+
 def test_update_frontmatter_writes_dates(tmp_path: Path) -> None:
     path = tmp_path / "note.md"
     path.write_text(SAMPLE)

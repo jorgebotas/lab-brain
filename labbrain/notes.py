@@ -22,9 +22,9 @@ from typing import Any
 
 import yaml
 from ruamel.yaml import YAML
-from ruamel.yaml.comments import CommentedMap
+from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from ruamel.yaml.error import YAMLError as RuamelYAMLError
-from ruamel.yaml.representer import RoundTripRepresenter
+from ruamel.yaml.scalarstring import SingleQuotedScalarString
 
 from labbrain.schema import FUTURE_AGENTS_HEADING, ID_FIELDS, BaseNote, validate_frontmatter
 
@@ -75,21 +75,35 @@ _YAML11_RESOLVER = yaml.resolver.Resolver()
 _STR_TAG = "tag:yaml.org,2002:str"
 
 
-class _Yaml11SafeRepresenter(RoundTripRepresenter):
-    """Single-quote plain strings that PyYAML (YAML 1.1) would not read back as strings.
+def _yaml11_safe(value: Any) -> Any:
+    """`value` with every plain string PyYAML (YAML 1.1) would not read back as a string
+    single-quoted, recursing into lists and mappings.
 
-    ruamel writes YAML 1.2, where ``yes``, ``No`` or ``on`` are plain strings, but reads
-    go through PyYAML, which resolves them to booleans. Only plain ``str`` values are
-    affected; ruamel's quoted scalar types keep their preserved style.
+    ruamel writes YAML 1.2, where ``yes``, ``No``, ``on`` or ``12:30`` are plain strings,
+    but reads go through PyYAML, which resolves them to booleans and numbers. Only values
+    the tool writes pass through here; values loaded from a file and left unchanged are
+    dumped as they were, so a frontmatter update never rewrites another field's line.
+    Ruamel containers are updated in place so their flow style and comments survive.
     """
-
-    def represent_str(self, data: str) -> Any:
-        if _YAML11_RESOLVER.resolve(yaml.ScalarNode, data, (True, False)) != _STR_TAG:
-            return self.represent_scalar(_STR_TAG, data, style="'")
-        return super().represent_str(data)
-
-
-_Yaml11SafeRepresenter.add_representer(str, _Yaml11SafeRepresenter.represent_str)
+    if isinstance(value, str):
+        if type(value) is str and (
+            _YAML11_RESOLVER.resolve(yaml.ScalarNode, value, (True, False)) != _STR_TAG
+        ):
+            return SingleQuotedScalarString(value)
+        return value
+    if isinstance(value, CommentedSeq):
+        for i, item in enumerate(value):
+            value[i] = _yaml11_safe(item)
+        return value
+    if isinstance(value, CommentedMap):
+        for key in list(value):
+            value[key] = _yaml11_safe(value[key])
+        return value
+    if isinstance(value, list | tuple):
+        return [_yaml11_safe(item) for item in value]
+    if isinstance(value, Mapping):
+        return {key: _yaml11_safe(item) for key, item in value.items()}
+    return value
 
 
 def rt_yaml(*, seq_offset: int = 2) -> YAML:
@@ -100,7 +114,6 @@ def rt_yaml(*, seq_offset: int = 2) -> YAML:
     The setting is document-wide, so one note should use one style.
     """
     yaml = YAML(typ="rt")
-    yaml.Representer = _Yaml11SafeRepresenter
     yaml.preserve_quotes = True
     yaml.width = 4096
     if seq_offset == 0:
@@ -349,8 +362,9 @@ def future_agents_block(note: Note) -> list[str] | None:
 
 
 def dump_frontmatter(data: Mapping[str, Any]) -> str:
+    """YAML for tool-written frontmatter; YAML-1.1-ambiguous strings are quoted."""
     buffer = io.StringIO()
-    rt_yaml().dump(data, buffer)
+    rt_yaml().dump(_yaml11_safe(data), buffer)
     return buffer.getvalue()
 
 
@@ -386,7 +400,9 @@ def update_frontmatter(path: Path, updates: Mapping[str, Any]) -> bool:
     """Set top-level frontmatter keys in place. Returns True if the file changed.
 
     Line endings, sequence indentation, key order, comments and quoting are kept, so
-    changing one scalar is a one-line diff. Errors name only the file and a line.
+    changing one scalar touches only that key's lines (a block value spans several).
+    Written strings that YAML 1.1 would not read as strings are single-quoted; values
+    already in the file are written back unchanged. Errors name only the file and a line.
     """
     with open(path, encoding="utf-8", newline="") as handle:
         text = handle.read()
@@ -405,7 +421,7 @@ def update_frontmatter(path: Path, updates: Mapping[str, Any]) -> bool:
     for key, value in updates.items():
         if key in data and data[key] == value:
             continue
-        data[key] = value
+        data[key] = _yaml11_safe(value)
         changed = True
     if not changed:
         return False

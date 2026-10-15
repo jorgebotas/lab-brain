@@ -52,6 +52,34 @@ def test_sync_output_never_trips_frozen_edit(vault_dir: Path) -> None:
     assert findings == []
 
 
+def test_sync_keeps_untouched_yaml11_scalars_verbatim(vault_dir: Path) -> None:
+    """Loaded values ruamel reads as strings but PyYAML does not (yes, no, 12:30) are
+    written back exactly as they were, so sync is still a frozen-edit-clean, few-line diff."""
+    replace(vault_dir, BASELINE, "dirty: false}", "dirty: yes}\nstarted: 12:30\nreviewed: no")
+    replace(
+        vault_dir,
+        SMOOTHING,
+        "links: [EXP-20260901-baseline]",
+        "links: [EXP-20260901-baseline]\nsupersedes: EXP-20260901-baseline",
+    )
+    commit_all(vault_dir, "supersede baseline")
+    before = (vault_dir / BASELINE).read_text()
+    assert [f.rule for f in lint.run(Vault.load(vault_dir), today=TODAY, only=["dirty-code"])] == [
+        "dirty-code"
+    ]
+    vault = Vault.load(vault_dir)
+    assert apply(vault, plan(vault)[0], TODAY) == [BASELINE]
+    after = (vault_dir / BASELINE).read_text()
+    for line in ("dirty: yes}\n", "started: 12:30\n", "reviewed: no\n"):
+        assert line in after
+    removed = set(before.splitlines()) - set(after.splitlines())
+    assert removed == {"updated: 2026-09-02", "status: done"}
+    findings = lint.run(
+        Vault.load(vault_dir), today=TODAY, only=["frozen-edit", "sync-pending", "dirty-code"]
+    )
+    assert [(f.rule, f.path) for f in findings] == [("dirty-code", BASELINE)]
+
+
 def test_draft_protocol_referenced_by_done_experiment_is_frozen(vault_dir: Path) -> None:
     replace(vault_dir, EVAL_V2, "status: frozen", "status: draft")
     commit_all(vault_dir, "draft protocol")

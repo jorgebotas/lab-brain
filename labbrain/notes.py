@@ -14,7 +14,7 @@ import os
 import re
 import stat
 import tempfile
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -257,9 +257,12 @@ def h2_headings(note: Note) -> list[tuple[int, str]]:
     return [(n, m.group(1)) for n, line in iter_body_lines(note) if (m := H2_RE.match(line))]
 
 
-def future_agents_block(note: Note) -> list[str] | None:
-    """Non-blank lines of the leading '## For future agents' block, else None."""
-    lines = [line for _, line in iter_body_lines(note)]
+def future_agents_end(lines: Sequence[str]) -> int | None:
+    """Index of the first line after the leading '## For future agents' block, else None.
+
+    ``lines`` are the body lines from ``iter_body_lines``. The block runs from the
+    heading (after any blank lines) to the next heading or the end of the body.
+    """
     i = 0
     while i < len(lines) and not lines[i].strip():
         i += 1
@@ -268,13 +271,20 @@ def future_agents_block(note: Note) -> list[str] | None:
     match = H2_RE.match(lines[i])
     if match is None or match.group(1) != FUTURE_AGENTS_HEADING:
         return None
-    block = []
-    for line in lines[i + 1 :]:
-        if HEADING_RE.match(line):
-            break
-        if line.strip():
-            block.append(line)
-    return block
+    i += 1
+    while i < len(lines) and not HEADING_RE.match(lines[i]):
+        i += 1
+    return i
+
+
+def future_agents_block(note: Note) -> list[str] | None:
+    """Non-blank lines of the leading '## For future agents' block, else None."""
+    lines = [line for _, line in iter_body_lines(note)]
+    end = future_agents_end(lines)
+    if end is None:
+        return None
+    # lines[:end] is leading blanks, the heading, then the block.
+    return [line for line in lines[:end] if line.strip()][1:]
 
 
 def dump_frontmatter(data: Mapping[str, Any]) -> str:

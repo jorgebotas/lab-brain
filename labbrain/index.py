@@ -5,8 +5,7 @@ from __future__ import annotations
 import re
 
 from labbrain.layout import INDEX_FILE
-from labbrain.notes import HEADING_RE, Note, atomic_write, iter_body_lines
-from labbrain.schema import FUTURE_AGENTS_HEADING
+from labbrain.notes import Note, atomic_write, future_agents_end, iter_body_lines
 from labbrain.vault import Vault
 
 TYPE_ORDER: tuple[str, ...] = (
@@ -39,13 +38,7 @@ _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 def summary(note: Note) -> str:
     """First sentence of the first paragraph after the For-future-agents block."""
     lines = [line for _, line in iter_body_lines(note)]
-    i = 0
-    while i < len(lines) and not lines[i].strip():
-        i += 1
-    if i < len(lines) and lines[i].strip() == f"## {FUTURE_AGENTS_HEADING}":
-        i += 1
-        while i < len(lines) and not HEADING_RE.match(lines[i]):
-            i += 1
+    i = future_agents_end(lines) or 0
     paragraph: list[str] = []
     for line in lines[i:]:
         stripped = line.strip()
@@ -83,10 +76,14 @@ def render(vault: Vault) -> str:
     return "".join(parts)
 
 
+# Both compare raw bytes, so a non-UTF-8 or CRLF index.md is stale (and rewritten)
+# instead of raising UnicodeDecodeError or passing as current.
+
+
 def write(vault: Vault) -> bool:
     path = vault.root / INDEX_FILE
     text = render(vault)
-    if path.is_file() and path.read_text(encoding="utf-8") == text:
+    if path.is_file() and path.read_bytes() == text.encode("utf-8"):
         return False
     atomic_write(path, text)
     return True
@@ -96,4 +93,4 @@ def is_stale(vault: Vault) -> bool | None:
     path = vault.root / INDEX_FILE
     if not path.is_file():
         return None
-    return path.read_text(encoding="utf-8") != render(vault)
+    return path.read_bytes() != render(vault).encode("utf-8")

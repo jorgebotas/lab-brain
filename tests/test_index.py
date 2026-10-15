@@ -7,6 +7,7 @@ from helpers import FIXTURE, TODAY, body_for, make_vault, note_text, write
 
 from labbrain import lint
 from labbrain.index import is_stale, render, summary
+from labbrain.index import write as write_index
 from labbrain.notes import parse_note_text
 from labbrain.vault import Vault
 
@@ -72,6 +73,8 @@ def test_summary_rules() -> None:
     assert (
         summary_of("## For future agents\n\nskip me\n\n## Summary\n\nFirst. Second.\n") == "First."
     )
+    loose = "##  For future agents ##\n\nagent only\n\n## Summary\n\nFirst. Second.\n"
+    assert summary_of(loose) == "First."
     assert summary_of("| a | b |\n|---|---|\n\nAfter the table.\n") == "After the table."
     assert summary_of("Value 0.81 holds. Next.\n") == "Value 0.81 holds."
     assert summary_of("") == ""
@@ -109,3 +112,17 @@ def test_is_stale_and_rule(vault_dir: Path) -> None:
     assert [f.rule for f in lint.run(vault, today=TODAY, only=["index-stale"])] == ["index-stale"]
     (vault_dir / "index.md").unlink()
     assert is_stale(Vault.load(vault_dir)) is None
+
+
+def test_unreadable_or_crlf_index_is_stale_and_rewritten(vault_dir: Path) -> None:
+    index = vault_dir / "index.md"
+    for raw in (b"\xff\xfe broken", EXPECTED_INDEX.replace("\n", "\r\n").encode("utf-8")):
+        index.write_bytes(raw)
+        vault = Vault.load(vault_dir)
+        assert is_stale(vault) is True
+        assert [f.rule for f in lint.run(vault, today=TODAY, only=["index-stale"])] == [
+            "index-stale"
+        ]
+        assert write_index(vault) is True
+        assert index.read_bytes() == EXPECTED_INDEX.encode("utf-8")
+        assert write_index(vault) is False

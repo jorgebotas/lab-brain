@@ -12,6 +12,7 @@ import pytest
 from labbrain.notes import (
     atomic_write,
     future_agents_block,
+    future_agents_end,
     h2_headings,
     parse_note,
     parse_note_text,
@@ -120,6 +121,14 @@ def test_future_agents_block() -> None:
     note = parse(head + "\n## For future agents\nline one\n\nline two\n\n## Summary\nbody\n")
     assert future_agents_block(note) == ["line one", "line two"]
     assert future_agents_block(parse(head + "## Summary\nbody\n")) is None
+
+
+def test_future_agents_end() -> None:
+    lines = ["", "##  For future agents ##", "line one", "", "## Summary", "body"]
+    assert future_agents_end(lines) == 4
+    assert future_agents_end(["## For future agents", "only block"]) == 2
+    assert future_agents_end(["## Summary", "body"]) is None
+    assert future_agents_end(["", "  "]) is None
 
 
 def test_update_frontmatter_is_a_one_line_diff(tmp_path: Path) -> None:

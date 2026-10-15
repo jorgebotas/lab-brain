@@ -126,3 +126,17 @@ def missing_future_agents_block(vault: Path) -> None:
         "trust the experiment notes over this page.\n\n",
         "",
     )
+
+
+# --- index-stale ---------------------------------------------------------------------
+
+
+@mutation("index-stale", keep_index=True)
+def index_stale_title(vault: Path) -> None:
+    """The concept's title changes after the index was generated; titles are free text."""
+    replace(
+        vault,
+        CONCEPT,
+        'title: "Label smoothing and calibration"',
+        'title: "Label smoothing, calibration and confidence"',
+    )

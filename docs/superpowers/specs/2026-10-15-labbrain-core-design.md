@@ -109,7 +109,7 @@ id_prefixes: {experiment: EXP, protocol: EVAL, claim: CLM, idea: IDEA,
               decision: ADR, literature: LIT, handoff: HO, dataset: DS}
 inbox_max_days: 30
 headline_metrics: []
-hash_ignore: [seed, "*.seed", output_dir, "*.output_dir", timestamp, run_name]
+hash_ignore: [seed, "*.seed", output_dir, "*.output_dir", timestamp, "*.timestamp", run_name, "*.run_name"]
 protocol_key: eval.protocol
 search: none
 phi: {mrn_regex: null, denylist_file: .labbrain/phi-denylist.txt}

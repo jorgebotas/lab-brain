@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import difflib
+import os
+import random
+import stat
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 from labbrain.notes import (
+    atomic_write,
     future_agents_block,
     h2_headings,
     parse_note_text,
@@ -144,3 +150,106 @@ def test_update_frontmatter_writes_dates(tmp_path: Path) -> None:
     update_frontmatter(path, {"updated": date(2026, 10, 15)})
     assert "updated: 2026-10-15\n" in path.read_text()
     assert list(tmp_path.iterdir()) == [path]  # no temp files left behind
+
+
+def _changed_lines(before: str, after: str) -> list[str]:
+    return [
+        line
+        for line in difflib.ndiff(before.splitlines(), after.splitlines())
+        if line.startswith(("+ ", "- "))
+    ]
+
+
+def _synthetic_value(seed: int) -> str:
+    return str(random.Random(seed).randrange(10**7, 10**8))
+
+
+def test_update_frontmatter_preserves_crlf(tmp_path: Path) -> None:
+    path = tmp_path / "note.md"
+    original = SAMPLE.replace("\n", "\r\n").encode()
+    path.write_bytes(original)
+    assert update_frontmatter(path, {"status": "done"}) is True
+    new = path.read_bytes()
+    before = original.decode().split("\r\n")
+    after = new.decode().split("\r\n")
+    assert all("\n" not in line for line in after)  # every line still ends in CRLF
+    assert _changed_lines("\n".join(before), "\n".join(after)) == [
+        "- status: running",
+        "+ status: done",
+    ]
+
+
+def test_update_frontmatter_keeps_file_mode(tmp_path: Path) -> None:
+    path = tmp_path / "note.md"
+    path.write_text(SAMPLE)
+    path.chmod(0o644)
+    assert update_frontmatter(path, {"status": "done"}) is True
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644
+
+
+def test_atomic_write_new_file_uses_umask(tmp_path: Path) -> None:
+    umask = os.umask(0o022)
+    try:
+        path = tmp_path / "sub" / "new.md"
+        atomic_write(path, "x\n")
+        assert stat.S_IMODE(path.stat().st_mode) == 0o644
+        os.umask(0o027)
+        other = tmp_path / "other.md"
+        atomic_write(other, "y\n")
+        assert stat.S_IMODE(other.stat().st_mode) == 0o640
+    finally:
+        os.umask(umask)
+
+
+def test_duplicate_key_is_a_read_error_without_key_or_value() -> None:
+    first, second = _synthetic_value(1), _synthetic_value(2)
+    note = parse(
+        f"---\nid: x\nsecret_field: {first}\nsecret_field: {second}\n---\nSee [[EXP-1]].\n"
+    )
+    assert note.data is None
+    assert note.errors == ["frontmatter has a duplicate key (line 4)"]
+    assert note.error_line == 4
+    assert [r.target for r in note.refs] == ["EXP-1"]
+
+
+def test_nested_duplicate_key_is_a_read_error() -> None:
+    note = parse("---\nid: x\nmetrics:\n  - {name: a, name: b}\n---\n")
+    assert note.errors == ["frontmatter has a duplicate key (line 4)"]
+
+
+def test_merge_keys_are_not_duplicates() -> None:
+    note = parse("---\nbase: &b {a: 1}\nderived:\n  <<: *b\n  a: 2\n---\n")
+    assert note.data is not None
+    assert note.data["derived"] == {"a": 2}
+
+
+def test_update_frontmatter_load_error_has_line_only(tmp_path: Path) -> None:
+    value = _synthetic_value(3)
+    path = tmp_path / "note.md"
+    text = f"---\nid: x\nsecret_field: {value}\nsecret_field: {value}\n---\nbody\n"
+    path.write_text(text)
+    with pytest.raises(ValueError) as info:
+        update_frontmatter(path, {"status": "done"})
+    message = str(info.value)
+    assert message == "note.md: frontmatter cannot be updated (line 4)"
+    assert value not in message and "secret_field" not in message
+    assert info.value.__cause__ is None and info.value.__suppress_context__
+    assert path.read_text() == text
+
+
+def test_update_frontmatter_keeps_zero_offset_lists(tmp_path: Path) -> None:
+    text = SAMPLE.replace("links:\n  - EXP-20261001-baseline\n", "links:\n- A\n- B\n")
+    text = text.replace("metrics:\n  - {", "metrics:\n- {")
+    assert "links:\n- A\n- B\nmetrics:\n- {" in text
+    path = tmp_path / "note.md"
+    path.write_text(text)
+    assert update_frontmatter(path, {"status": "done"}) is True
+    assert _changed_lines(text, path.read_text()) == ["- status: running", "+ status: done"]
+
+
+def test_update_frontmatter_keeps_zero_offset_block_mappings(tmp_path: Path) -> None:
+    text = "---\nid: x\nstatus: running\nmetrics:\n- name: ece\n  value: 0.04\n---\nbody\n"
+    path = tmp_path / "note.md"
+    path.write_text(text)
+    assert update_frontmatter(path, {"status": "done"}) is True
+    assert _changed_lines(text, path.read_text()) == ["- status: running", "+ status: done"]

@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import os
 import re
+import stat
 import tempfile
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
@@ -22,6 +23,7 @@ from typing import Any
 import yaml
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
+from ruamel.yaml.error import YAMLError as RuamelYAMLError
 
 from labbrain.schema import FUTURE_AGENTS_HEADING, ID_FIELDS, BaseNote, validate_frontmatter
 
@@ -33,21 +35,71 @@ _FILE_EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,8}\Z")
 H2_RE = re.compile(r"^##[ \t]+(.+?)[ \t]*#*[ \t]*$")
 HEADING_RE = re.compile(r"^#{1,6}[ \t]")
 
+_SEQ_ITEM_RE = re.compile(r"^( *)-(?:[ \t]|$)")
+_BLOCK_KEY_RE = re.compile(r"^( *)[^\s#-][^#]*:[ \t]*(?:#.*)?$")
+_MERGE_TAG = "tag:yaml.org,2002:merge"
+
 _LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
 
+class DuplicateKeyError(yaml.constructor.ConstructorError):
+    """A mapping repeats a key. Carries only the position, never the key or value."""
+
+
+class _StrictLoader(_LOADER):  # type: ignore[misc,valid-type]
+    """The fast safe loader, but duplicate mapping keys are an error (as in ruamel)."""
+
+    def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> dict[Any, Any]:
+        seen: set[Any] = set()
+        for key_node, _ in node.value:
+            if key_node.tag == _MERGE_TAG:
+                continue
+            key = self.construct_object(key_node, deep=True)
+            try:
+                duplicate = key in seen
+            except TypeError:  # unhashable: the base constructor reports it
+                continue
+            if duplicate:
+                raise DuplicateKeyError(problem="duplicate key", problem_mark=key_node.start_mark)
+            seen.add(key)
+        return super().construct_mapping(node, deep=deep)
+
+
 def safe_load(text: str) -> Any:
-    """Fast, safe YAML read. Raises yaml.YAMLError on invalid input."""
-    return yaml.load(text, Loader=_LOADER)  # safe: only SafeLoader or CSafeLoader
+    """Fast, safe YAML read. Raises yaml.YAMLError on invalid input or duplicate keys."""
+    return yaml.load(text, Loader=_StrictLoader)  # safe: subclass of (C)SafeLoader
 
 
-def rt_yaml() -> YAML:
-    """Round-trip YAML configured for Obsidian's property style."""
+def rt_yaml(*, seq_offset: int = 2) -> YAML:
+    """Round-trip YAML configured for Obsidian's property style.
+
+    ``seq_offset`` is how far block-sequence dashes sit right of their parent key:
+    2 (Obsidian's style, dash indented under the key) or 0 (dash flush with the key).
+    The setting is document-wide, so one note should use one style.
+    """
     yaml = YAML(typ="rt")
     yaml.preserve_quotes = True
     yaml.width = 4096
-    yaml.indent(mapping=2, sequence=4, offset=2)
+    if seq_offset == 0:
+        yaml.indent(mapping=2, sequence=2, offset=0)
+    else:
+        yaml.indent(mapping=2, sequence=4, offset=2)
     return yaml
+
+
+def _detect_seq_offset(frontmatter: str) -> int:
+    """Dash offset of the first block-sequence item relative to its parent key; default 2."""
+    parent: str | None = None
+    for line in frontmatter.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        item = _SEQ_ITEM_RE.match(line)
+        if item is not None and parent is not None:
+            key = _BLOCK_KEY_RE.match(parent)
+            if key is not None:
+                return 0 if len(item.group(1)) == len(key.group(1)) else 2
+        parent = line
+    return 2
 
 
 @dataclass(frozen=True)
@@ -121,7 +173,7 @@ def split_frontmatter(text: str) -> tuple[str | None, str, int]:
     return match.group("fm"), text[match.end() :], match.group(0).count("\n") + 1
 
 
-def _yaml_error_line(exc: yaml.YAMLError) -> int:
+def _yaml_error_line(exc: yaml.YAMLError | RuamelYAMLError) -> int:
     mark = getattr(exc, "problem_mark", None) or getattr(exc, "context_mark", None)
     return mark.line + 2 if mark is not None else 1  # +1 one-based, +1 opening ---
 
@@ -134,6 +186,9 @@ def parse_note_text(text: str, path: Path, rel: str) -> Note:
     else:
         try:
             loaded = safe_load(fm)
+        except DuplicateKeyError as exc:
+            note.error_line = _yaml_error_line(exc)
+            note.errors.append(f"frontmatter has a duplicate key (line {note.error_line})")
         except yaml.YAMLError as exc:
             note.error_line = _yaml_error_line(exc)
             note.errors.append(f"frontmatter is not valid YAML (line {note.error_line})")
@@ -219,12 +274,24 @@ def render_note(data: Mapping[str, Any], body: str) -> str:
     return f"---\n{dump_frontmatter(data)}---\n{body}"
 
 
+def _target_mode(path: Path) -> int:
+    """The existing file's permission bits, else what open() would create (0o666 & ~umask)."""
+    try:
+        return stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        umask = os.umask(0)
+        os.umask(umask)
+        return 0o666 & ~umask
+
+
 def atomic_write(path: Path, text: str) -> None:
+    """Write text verbatim (no newline translation) via a temp file and rename."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)
+        os.chmod(tmp, _target_mode(path))  # mkstemp creates 0o600
         os.replace(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
@@ -232,13 +299,24 @@ def atomic_write(path: Path, text: str) -> None:
 
 
 def update_frontmatter(path: Path, updates: Mapping[str, Any]) -> bool:
-    """Set top-level frontmatter keys in place. Returns True if the file changed."""
-    text = path.read_text(encoding="utf-8")
+    """Set top-level frontmatter keys in place. Returns True if the file changed.
+
+    Line endings, sequence indentation, key order, comments and quoting are kept, so
+    changing one scalar is a one-line diff. Errors name only the file and a line.
+    """
+    with open(path, encoding="utf-8", newline="") as handle:
+        text = handle.read()
     match = _FM_RE.match(text)
     if match is None:
         raise ValueError(f"{path.name} has no frontmatter to update")
-    yaml = rt_yaml()
-    data = yaml.load(match.group("fm")) or CommentedMap()
+    crlf = text[: match.start("fm")].endswith("\r\n")
+    frontmatter = match.group("fm").replace("\r\n", "\n")
+    yaml = rt_yaml(seq_offset=_detect_seq_offset(frontmatter))
+    try:
+        data = yaml.load(frontmatter) or CommentedMap()
+    except RuamelYAMLError as exc:
+        line = _yaml_error_line(exc)
+        raise ValueError(f"{path.name}: frontmatter cannot be updated (line {line})") from None
     changed = False
     for key, value in updates.items():
         if key in data and data[key] == value:
@@ -249,5 +327,8 @@ def update_frontmatter(path: Path, updates: Mapping[str, Any]) -> bool:
         return False
     buffer = io.StringIO()
     yaml.dump(data, buffer)
-    atomic_write(path, text[: match.start("fm")] + buffer.getvalue() + text[match.end("fm") :])
+    dumped = buffer.getvalue()
+    if crlf:
+        dumped = dumped.replace("\n", "\r\n")
+    atomic_write(path, text[: match.start("fm")] + dumped + text[match.end("fm") :])
     return True

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -18,6 +18,7 @@ from labbrain import __version__
 from labbrain.ids import DEFAULT_PREFIXES
 from labbrain.layout import CONFIG_PATH, iter_note_files
 from labbrain.notes import Note, parse_read_note, read_note_text, safe_load
+from labbrain.readpool import ordered_map
 
 ENV_VAULT = "LABBRAIN_VAULT"
 ENV_NOW = "LABBRAIN_NOW"
@@ -186,11 +187,6 @@ def _version_tuple(version: str) -> tuple[int, ...]:
     return tuple(int(part) for part in re.findall(r"\d+", version)[:3])
 
 
-def read_workers() -> int:
-    """Threads for concurrent file reads (reads wait on I/O and on-access scanners)."""
-    return min(16, os.cpu_count() or 4)
-
-
 def version_warning(config: Config) -> str | None:
     if _version_tuple(__version__) < _version_tuple(config.engine_min_version):
         return (
@@ -218,9 +214,9 @@ class Vault:
         by_rel: dict[str, Note] = {}
         paths = list(iter_note_files(root))
         # Reads run in worker threads; parsing stays here, in sorted path order, as
-        # results arrive (map yields in submission order), so every ordering is unchanged.
-        with ThreadPoolExecutor(max_workers=read_workers()) as pool:
-            for path, text in zip(paths, pool.map(read_note_text, paths), strict=True):
+        # results arrive (ordered_map yields in input order), so every ordering is unchanged.
+        with closing(ordered_map(read_note_text, paths)) as texts:
+            for path, text in zip(paths, texts, strict=True):
                 note = parse_read_note(path, root, text)
                 groups[note.stem].append(note)
                 by_rel[note.rel] = note

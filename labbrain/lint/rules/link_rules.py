@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from labbrain.findings import ERROR, WARNING, Finding
@@ -25,18 +26,27 @@ def _render(target: str) -> str:
 _FILENAMES_KEY = "link_rules.filenames"
 
 
-def _is_file(entry: os.DirEntry[str]) -> bool:
+# Errors pathlib treats as "does not exist" (Python 3.11 pathlib._IGNORED_ERRNOS).
+_MISSING_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP})
+
+
+def _entry_test(test: Callable[[], bool]) -> bool:
+    """Run a DirEntry type test like pathlib: a missing target is False, other errors raise."""
     try:
-        return entry.is_file()  # follows symlinks, like Path.is_file
-    except OSError:
-        return False
+        return test()
+    except OSError as exc:
+        if exc.errno in _MISSING_ERRNOS:
+            return False
+        raise
 
 
 def _walk_filenames(root: Path) -> set[str]:
     """Names of regular files (or symlinks to them) under `root`.
 
     Descends only real directories whose name does not start with a dot (.git,
-    .obsidian, .labbrain, ...), and never collects an entry named `.git`.
+    .obsidian, .labbrain, ...), and never collects an entry named `.git`. Like the
+    `rglob` it replaces, a directory that cannot be listed for lack of permission is
+    skipped; any other error propagates.
     """
     names: set[str] = set()
     stack = [os.fspath(root)]
@@ -45,19 +55,15 @@ def _walk_filenames(root: Path) -> set[str]:
         try:
             with os.scandir(here) as listing:
                 entries = list(listing)
-        except OSError:
+        except PermissionError:
             continue
         for entry in entries:
             if entry.name == ".git":
                 continue
-            try:
-                is_real_dir = entry.is_dir(follow_symlinks=False)
-            except OSError:
-                is_real_dir = False
-            if is_real_dir:
+            if _entry_test(lambda e=entry: e.is_dir(follow_symlinks=False)):
                 if not entry.name.startswith("."):
                     stack.append(entry.path)
-            elif _is_file(entry):
+            elif _entry_test(entry.is_file):  # follows symlinks, like Path.is_file
                 names.add(entry.name)
     return names
 

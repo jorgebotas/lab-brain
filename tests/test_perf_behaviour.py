@@ -6,18 +6,23 @@ Every identifier is synthetic and generated from a seeded RNG.
 
 from __future__ import annotations
 
+import errno
 import os
 import random
+import threading
 import time
+import tracemalloc
 from collections.abc import Callable
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
 import pytest
 from helpers import TODAY, body_for, make_vault, note_text, write
 
-from labbrain import index, lint, notes, phi, vault
+from labbrain import index, lint, notes, phi, readpool, vault
 from labbrain.layout import iter_note_files
+from labbrain.lint.rules import link_rules
 from labbrain.notes import (
     future_agents_block,
     h2_headings,
@@ -72,6 +77,7 @@ def test_load_order_matches_a_sequential_parse(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = _many_notes(tmp_path).resolve()
+    monkeypatch.setattr(readpool, "read_workers", lambda: 2)  # window 4 < 27 notes
     monkeypatch.setattr(vault, "read_note_text", _jittered(notes.read_note_text))
     loaded = Vault.load(root)
     sequential = [parse_note(path, root) for path in iter_note_files(root)]
@@ -143,6 +149,7 @@ def test_concurrent_phi_reads_give_sequential_findings(
     # the NUL file is still re-read from disk and skipped as binary.
     expected = scan([root], texts=texts, **kwargs)
     assert len(expected) == 10
+    monkeypatch.setattr(readpool, "read_workers", lambda: 2)
     monkeypatch.setattr(phi, "_read_outcome", _jittered(phi._read_outcome))
     assert scan([root], **kwargs) == expected
     some = dict(list(texts.items())[::2])
@@ -190,6 +197,89 @@ def test_unreadable_and_outside_findings_with_concurrent_reads(tmp_path: Path) -
         ("linked", "phi-unreadable", phi.OUTSIDE),
         ("notes/locked.md", "phi-unreadable", phi.UNREADABLE),
     ]
+
+
+def test_ordered_map_keeps_order_and_bounds_the_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(readpool, "read_workers", lambda: 3)
+    started: list[int] = []
+    lock = threading.Lock()
+
+    def work(item: int) -> int:
+        with lock:
+            started.append(item)
+        time.sleep(0.0005 * (item % 4))
+        return item * 10
+
+    out = []
+    for consumed, value in enumerate(readpool.ordered_map(work, range(60)), start=1):
+        time.sleep(0.001)  # a slow consumer
+        with lock:
+            assert len(started) - consumed <= 2 * 3  # never more than the window ahead
+        out.append(value)
+    assert out == [i * 10 for i in range(60)]
+
+
+def test_closing_ordered_map_cancels_pending_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(readpool, "read_workers", lambda: 2)
+    calls: list[int] = []
+    with closing(readpool.ordered_map(calls.append, range(1000))) as results:
+        next(results)
+    time.sleep(0.05)
+    assert len(calls) <= 2 * 2 + 1
+
+
+def test_read_workers_is_capped_at_eight() -> None:
+    assert 1 <= readpool.read_workers() <= 8
+
+
+def test_phi_scan_memory_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = make_vault(tmp_path / "v").resolve()
+    size, count = 1 << 20, 48
+    for i in range(count):
+        (root / "raw").mkdir(exist_ok=True)
+        (root / "raw" / f"big{i}.txt").write_bytes(b"plain text line\n" * (size // 16))
+    monkeypatch.setattr(readpool, "read_workers", lambda: 2)
+
+    def slow_scan(text: str, settings: ScanSettings) -> list[phi.PhiHit]:
+        time.sleep(0.003)  # workers would race ahead of an unbounded consumer
+        return []
+
+    monkeypatch.setattr(phi, "scan_text", slow_scan)
+    tracemalloc.start()
+    try:
+        scan([root], root=root, settings=ScanSettings(), allow=frozenset())
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < count * size // 4  # window of 4 files, not all 48
+
+
+@pytest.mark.parametrize("error", [RuntimeError, KeyboardInterrupt])
+def test_phi_scan_stops_reading_when_the_scan_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: type[BaseException]
+) -> None:
+    root = make_vault(tmp_path / "v").resolve()
+    for i in range(200):
+        write(root, f"notes/n{i:03d}.md", "text\n")
+    monkeypatch.setattr(readpool, "read_workers", lambda: 2)
+    reads: list[Path] = []
+    real = phi._read_text
+
+    def counting(path: Path) -> str | None:
+        reads.append(path)
+        return real(path)
+
+    def boom(text: str, settings: ScanSettings) -> list[phi.PhiHit]:
+        raise error
+
+    monkeypatch.setattr(phi, "_read_text", counting)
+    monkeypatch.setattr(phi, "scan_text", boom)
+    started = time.perf_counter()
+    with pytest.raises(error):
+        scan([root], root=root, settings=ScanSettings(), allow=frozenset())
+    assert time.perf_counter() - started < 5
+    time.sleep(0.05)  # reads already running may finish; none new may start
+    assert len(reads) <= 2 * 2 + 1
 
 
 # 3. The filename walk skips dot-directories.
@@ -327,3 +417,45 @@ def test_body_line_cache_follows_a_replaced_body() -> None:
     other = parse_note_text(AGENT_CONCEPT, Path("concepts/c1.md"), "concepts/c1.md")
     other._body_lines = None
     assert fresh == other  # the cache takes no part in equality
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can list chmod 000 directories")
+def test_filename_walk_skips_unlistable_directories(tmp_path: Path) -> None:
+    root = make_vault(tmp_path / "v")
+    write(root, "raw/ok.png", "png")
+    write(root, "raw/locked/inside.png", "png")
+    (root / "raw" / "locked").chmod(0)
+    try:
+        assert link_rules._walk_filenames(root) == {"ok.png"}
+    finally:
+        (root / "raw" / "locked").chmod(0o755)
+
+
+def test_filename_walk_propagates_other_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = make_vault(tmp_path / "v")
+    write(root, "raw/sub/a.png", "png")
+    real = os.scandir
+
+    def scandir(path: str) -> Any:
+        if path.endswith("sub"):
+            raise OSError(errno.EIO, "I/O error")
+        return real(path)
+
+    monkeypatch.setattr(link_rules.os, "scandir", scandir)
+    with pytest.raises(OSError):
+        link_rules._walk_filenames(root)
+
+
+def test_entry_tests_follow_pathlib_error_rules() -> None:
+    def raising(exc: OSError) -> Any:
+        def test() -> bool:
+            raise exc
+
+        return test
+
+    assert link_rules._entry_test(raising(FileNotFoundError(errno.ENOENT, "gone"))) is False
+    assert link_rules._entry_test(raising(OSError(errno.ELOOP, "loop"))) is False
+    with pytest.raises(PermissionError):
+        link_rules._entry_test(raising(PermissionError(errno.EACCES, "denied")))

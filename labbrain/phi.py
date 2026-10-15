@@ -13,7 +13,7 @@ import os
 import re
 import stat
 from collections.abc import Iterable, Iterator, Mapping
-from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -22,7 +22,8 @@ import yaml
 from labbrain.findings import ERROR, Finding, sort_findings
 from labbrain.layout import ALLOWLIST_PATH, INDEX_FILE, PHI_SKIP_DIR_NAMES, PHI_SKIP_FILES
 from labbrain.notes import safe_load
-from labbrain.vault import Config, ConfigError, read_workers
+from labbrain.readpool import ordered_map
+from labbrain.vault import Config, ConfigError
 
 WINDOW = 30
 _MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?"
@@ -439,8 +440,9 @@ def scan(
                 to_read.append(path)
             else:
                 memory[index] = text
-    with ThreadPoolExecutor(max_workers=read_workers()) as pool:
-        outcomes = pool.map(_read_outcome, to_read)
+    # At most a bounded window of disk reads is held in memory; stopping early (an
+    # exception, Ctrl-C) cancels the reads not yet started.
+    with closing(ordered_map(_read_outcome, to_read)) as outcomes:
         for index, (path, problem) in enumerate(candidates):
             rel = _rel(path, resolved_root)
             text = None

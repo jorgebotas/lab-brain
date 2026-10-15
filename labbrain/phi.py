@@ -27,10 +27,10 @@ WINDOW = 30
 _MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?"
 _HAS_DIGIT = re.compile(r"\d")
 _DIGITS_6_12 = re.compile(r"(?<!\d)\d{6,12}(?!\d)")
-# Bare `record` counts (fail closed); `recorded` and `records` do not. `#` takes no
-# trailing \b, which could never match before a space or a digit.
+# `record` counts only as "medical record" or followed by no/no./number/#; `#` takes
+# no trailing \b, which could never match before a space or a digit.
 _MRN_CONTEXT = re.compile(
-    r"(?i)\b(?:mrn\b|medical\s+record\b|record\b(?:\s*(?:no\b\.?|number\b|#))?"
+    r"(?i)\b(?:mrn\b|medical\s+record\b|record\s*(?:no\b\.?|number\b|#)"
     r"|patient[\s_-]*id\b|chart\b)"
 )
 _DATE = re.compile(

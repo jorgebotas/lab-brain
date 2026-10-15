@@ -314,9 +314,10 @@ MRN_CONTEXTS = [
     "Patient-ID: {}",
     "patient-id {}",
     "patient_id={}",
-    "record {}",
     "record # {}",
     "Record #{}",
+    "record no. {}",
+    "record number {}",
 ]
 
 
@@ -329,10 +330,11 @@ def test_mrn_context_variants(template: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "template", ["Recorded {} events in the run.", "The records {} were merged."]
+    "template",
+    ["Recorded {} events in the run.", "The records {} were merged.", "record {} as the run id"],
 )
 def test_mrn_context_needs_the_whole_word(template: str) -> None:
-    """Bare `record` counts as context (fail closed); `recorded` and `records` do not."""
+    """`record` is context only as medical record or with no/number/#, never bare."""
     assert scan_text(template.format(mrn()) + "\n", ScanSettings()) == []
 
 

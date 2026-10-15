@@ -8,6 +8,7 @@ committed unless commit=False (only frozen-edit mutations stay uncommitted).
 
 from __future__ import annotations
 
+import random
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -296,3 +297,34 @@ def sync_pending_protocol(vault: Path) -> None:
     """EVAL-v2 is `draft` although done experiments reference it (committed, so no
     frozen-edit)."""
     replace(vault, EVAL_V2, "status: frozen", "status: draft")
+
+
+# --- phi -----------------------------------------------------------------------------
+
+_RNG = random.Random(4242)
+
+
+def _synthetic_phone() -> str:
+    return f"{_RNG.randrange(200, 999)}-555-{_RNG.randrange(1000, 9999)}"
+
+
+@mutation("phi")
+def phi_phone_in_concept(vault: Path) -> None:
+    """A synthetic phone number in the concept; the line has no metric-like number."""
+    replace(
+        vault,
+        CONCEPT,
+        "## Open questions\n\n",
+        f"## Open questions\n\nAsk the data steward at {_synthetic_phone()} about access.\n\n",
+    )
+
+
+@mutation("phi")
+def phi_small_cell_in_dataset(vault: Path) -> None:
+    """A dataset reports a count below min_cell_size (committed, so no frozen-edit)."""
+    replace(
+        vault,
+        DATASET,
+        "All images; no filtering.",
+        "All images; no filtering. Excluded: n = 4 patients.",
+    )

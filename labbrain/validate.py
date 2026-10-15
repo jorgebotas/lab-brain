@@ -1,7 +1,8 @@
 """Single-file validation: what the M5 PostToolUse hook runs on every write.
 
 Never loads the whole vault. It parses one note, checks it against the config,
-and finds duplicate filenames with a directory walk.
+finds duplicate filenames with a directory walk, and scans the file for PHI when
+the project is protected.
 """
 
 from __future__ import annotations
@@ -41,6 +42,19 @@ def validate_path(path: Path, *, vault: Path | None = None) -> list[Finding]:
     findings: list[Finding] = []
     if is_note_rel(rel):
         findings.extend(_check_note_file(target, root, config))
+    if config.protected_data:
+        from labbrain.phi import ScanSettings, in_scan_scope, load_allowlist, scan
+
+        if in_scan_scope(rel):
+            findings.extend(
+                scan(
+                    [target],
+                    root=root,
+                    settings=ScanSettings.from_config(config, root),
+                    allow=load_allowlist(root),
+                    rule_name="phi",
+                )
+            )
     return sort_findings(findings)
 
 

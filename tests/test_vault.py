@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import date, datetime
 from pathlib import Path
 
@@ -164,3 +165,18 @@ def test_invalid_notes_still_register_and_link(tmp_path: Path) -> None:
     vault = Vault.load(root)
     assert vault.inbound["EXP-20261001-a"] == {"broken", "unparsable"}
     assert vault.notes["unparsable"].data is None
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read chmod 000 files")
+def test_unreadable_note_does_not_abort_load(tmp_path: Path) -> None:
+    root = make_vault(tmp_path)
+    write(root, "experiments/EXP-20261001-a.md", note_text("EXP-20261001-a", "experiment"))
+    locked = write(root, "concepts/locked.md", note_text("locked", "concept"))
+    locked.chmod(0)
+    try:
+        vault = Vault.load(root)
+    finally:
+        locked.chmod(0o644)
+    assert sorted(vault.notes) == ["EXP-20261001-a", "locked"]
+    assert vault.notes["locked"].errors == ["cannot read file"]
+    assert vault.notes["EXP-20261001-a"].data is not None

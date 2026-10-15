@@ -205,8 +205,21 @@ def parse_note_text(text: str, path: Path, rel: str) -> Note:
 
 
 def parse_note(path: Path, root: Path) -> Note:
-    text = path.read_text(encoding="utf-8", errors="replace")
-    return parse_note_text(text, path, path.relative_to(root).as_posix())
+    """Parse a note file. An unreadable file becomes a Note with a read error, never a raise."""
+    rel = path.relative_to(root).as_posix()
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return Note(
+            path=path,
+            rel=rel,
+            text="",
+            data=None,
+            body="",
+            body_line=1,
+            errors=["cannot read file"],
+        )
+    return parse_note_text(text, path, rel)
 
 
 def iter_body_lines(note: Note) -> Iterator[tuple[int, str]]:

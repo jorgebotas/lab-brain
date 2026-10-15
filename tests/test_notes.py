@@ -13,6 +13,7 @@ from labbrain.notes import (
     atomic_write,
     future_agents_block,
     h2_headings,
+    parse_note,
     parse_note_text,
     update_frontmatter,
     wikilink_targets,
@@ -253,3 +254,19 @@ def test_update_frontmatter_keeps_zero_offset_block_mappings(tmp_path: Path) -> 
     path.write_text(text)
     assert update_frontmatter(path, {"status": "done"}) is True
     assert _changed_lines(text, path.read_text()) == ["- status: running", "+ status: done"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read chmod 000 files")
+def test_unreadable_file_is_a_note_with_a_read_error(tmp_path: Path) -> None:
+    path = tmp_path / "concepts" / "locked.md"
+    path.parent.mkdir()
+    path.write_text(SAMPLE)
+    path.chmod(0)
+    try:
+        note = parse_note(path, tmp_path)
+    finally:
+        path.chmod(0o644)
+    assert note.rel == "concepts/locked.md" and note.stem == "locked"
+    assert note.data is None and note.body == "" and note.body_line == 1
+    assert note.errors == ["cannot read file"]
+    assert note.refs == []

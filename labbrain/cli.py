@@ -1,0 +1,427 @@
+"""`labbrain` command line: parse arguments, call the library, format output.
+
+Only the standard library and labbrain.layout are imported at module level;
+everything else is imported inside the command that needs it, because the
+lab-brain hooks call this CLI on every tool use.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from labbrain import __version__
+from labbrain.layout import NOTE_TYPES
+
+EXIT_OK, EXIT_FINDINGS, EXIT_USAGE = 0, 1, 2
+
+
+class UsageError(Exception):
+    """Reported on stderr with exit code 2."""
+
+
+# --- helpers ----------------------------------------------------------------------
+
+
+def _root(args: argparse.Namespace) -> Path:
+    from labbrain.vault import find_root
+
+    return find_root(explicit=args.vault)
+
+
+def _optional_root(args: argparse.Namespace, start: Path | None = None) -> Path | None:
+    """The vault root, or None when auto-discovery finds none.
+
+    An explicit --vault or LABBRAIN_VAULT that names a non-vault is still an error
+    (exit 2), as in validate: falling back to defaults there would silently drop the
+    vault's PHI settings or hash_ignore.
+    """
+    from labbrain.vault import ENV_VAULT, VaultNotFound, find_root
+
+    try:
+        return find_root(start=start, explicit=args.vault)
+    except VaultNotFound:
+        if args.vault or os.environ.get(ENV_VAULT):
+            raise
+        return None
+
+
+def _warn_version(config: Any) -> None:
+    from labbrain.vault import version_warning
+
+    warning = version_warning(config)
+    if warning:
+        print(f"labbrain: warning: {warning}", file=sys.stderr)
+
+
+def _config(args: argparse.Namespace) -> tuple[Path, Any]:
+    from labbrain.vault import load_config
+
+    root = _root(args)
+    config = load_config(root)
+    _warn_version(config)
+    return root, config
+
+
+def _vault(args: argparse.Namespace) -> Any:
+    from labbrain.vault import Vault
+
+    root, config = _config(args)
+    return Vault.load(root, config)
+
+
+def _emit(findings: list[Any], fmt: str) -> int:
+    from labbrain.findings import exit_code, render
+
+    output = render(findings, fmt)
+    if output:
+        print(output)
+    return exit_code(findings)
+
+
+def _now(at: str | None) -> datetime:
+    from labbrain.vault import now
+
+    if not at:
+        return now()
+    try:
+        return datetime.fromisoformat(at)
+    except ValueError as exc:
+        raise UsageError("--at must be an ISO datetime") from exc
+
+
+def _author(args: argparse.Namespace) -> str:
+    author = args.author or os.environ.get("LABBRAIN_AUTHOR")
+    if not author:
+        raise UsageError("--author is required (or set LABBRAIN_AUTHOR)")
+    return author
+
+
+# --- commands ---------------------------------------------------------------------
+
+
+def cmd_vault_root(args: argparse.Namespace) -> int:
+    print(_root(args))
+    return EXIT_OK
+
+
+def cmd_config(args: argparse.Namespace) -> int:
+    _, config = _config(args)
+    data: Any = config.model_dump(mode="json")
+    if args.key:
+        for part in args.key.split("."):
+            if not isinstance(data, dict) or part not in data:
+                raise UsageError(f"no config key {args.key}")
+            data = data[part]
+        print(data if isinstance(data, str) else json.dumps(data))
+    else:
+        print(json.dumps(data, indent=2))
+    return EXIT_OK
+
+
+def cmd_new_id(args: argparse.Namespace) -> int:
+    from labbrain.ids import IdError, new_id
+
+    if args.type not in ("protocol", "handoff") and not args.title:
+        raise UsageError(f"--title is required for {args.type} IDs")
+    root, config = _config(args)
+    try:
+        note_id = new_id(
+            args.type,
+            root=root,
+            now=_now(args.at),
+            title=args.title,
+            prefixes=config.id_prefixes,
+            agent=args.agent or args.author or "",
+            first_author=args.first_author,
+            year=args.year,
+            name=args.name,
+        )
+    except IdError as exc:
+        raise UsageError(str(exc)) from exc
+    print(note_id)
+    return EXIT_OK
+
+
+def cmd_new(args: argparse.Namespace) -> int:
+    from labbrain.ids import IdError
+    from labbrain.scaffold import create
+
+    if not args.title:
+        raise UsageError("--title is required")
+    author = _author(args)
+    root, config = _config(args)
+    try:
+        path = create(
+            root,
+            config,
+            args.type,
+            title=args.title,
+            author=author,
+            now=_now(args.at),
+            links=args.link,
+            agent=args.agent,
+            first_author=args.first_author,
+            year=args.year,
+            name=args.name,
+        )
+    except IdError as exc:
+        raise UsageError(str(exc)) from exc
+    print(path)
+    return EXIT_OK
+
+
+def cmd_validate(args: argparse.Namespace) -> int:
+    from labbrain.validate import validate_paths
+
+    return _emit(validate_paths(args.paths, vault=args.vault), args.format)
+
+
+def cmd_sync(args: argparse.Namespace) -> int:
+    from labbrain.findings import ERROR, INFO, Finding, sort_findings
+    from labbrain.sync import apply, plan
+    from labbrain.vault import today
+
+    vault = _vault(args)
+    changes, conflicts = plan(vault)
+    if not args.dry_run:
+        apply(vault, changes, today())
+    verb = "would update" if args.dry_run else "updated"
+    findings = [Finding(c.rel, 1, "sync", ERROR, c.message) for c in conflicts]
+    for change in changes:
+        fields = ", ".join(f"{key} → {value}" for key, value in change.updates.items())
+        findings.append(Finding(change.rel, 1, "sync", INFO, f"{verb}: {fields} ({change.reason})"))
+    return _emit(sort_findings(findings), args.format)
+
+
+def cmd_index(args: argparse.Namespace) -> int:
+    from labbrain.index import is_stale, write
+
+    vault = _vault(args)
+    if args.check:
+        stale = is_stale(vault)
+        if stale is None:
+            print("index.md is missing; run `labbrain index`")
+            return EXIT_FINDINGS
+        if stale:
+            print("index.md is out of date; run `labbrain index`")
+            return EXIT_FINDINGS
+        print("index.md is up to date")
+        return EXIT_OK
+    print("index.md updated" if write(vault) else "index.md already up to date")
+    return EXIT_OK
+
+
+def cmd_log(args: argparse.Namespace) -> int:
+    from labbrain.log import append
+    from labbrain.vault import now
+
+    try:
+        path = append(_root(args), args.text, when=now(), author=args.author)
+    except ValueError as exc:
+        raise UsageError(str(exc)) from exc
+    print(path)
+    return EXIT_OK
+
+
+def cmd_lint(args: argparse.Namespace) -> int:
+    from labbrain import lint
+
+    vault = _vault(args)
+    try:
+        findings = lint.run(vault, base=args.base, only=args.rule or None)
+    except lint.UnknownRuleError as exc:
+        raise UsageError(str(exc)) from exc
+    return _emit(findings, args.format)
+
+
+def cmd_phi_scan(args: argparse.Namespace) -> int:
+    from labbrain.phi import ScanSettings, load_allowlist, scan
+    from labbrain.vault import default_config, load_config
+
+    paths = [p.expanduser().resolve() for p in args.paths]
+    for path in paths:
+        if not path.exists():
+            raise UsageError(f"no such file or directory: {path.name}")
+    start = paths[0] if paths[0].is_dir() else paths[0].parent
+    root = _optional_root(args, start)
+    config = default_config() if root is None else load_config(root)
+    settings = ScanSettings.from_config(config, root)
+    return _emit(scan(paths, root=root, settings=settings, allow=load_allowlist(root)), args.format)
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    from labbrain.query import list_notes
+
+    rows = list_notes(_vault(args), note_type=args.note_type, status=args.status, tag=args.tag)
+    if args.json:
+        print(json.dumps(rows, indent=2))
+    else:
+        for row in rows:
+            print(f"{row['id']}\t{row['type']}\t{row['status'] or ''}\t{row['title'] or ''}")
+    return EXIT_OK
+
+
+def cmd_links(args: argparse.Namespace) -> int:
+    from labbrain.query import links
+
+    try:
+        data = links(_vault(args), args.id)
+    except KeyError as exc:
+        raise UsageError(f"no note with ID {args.id}") from exc
+    directions = [args.direction] if args.direction else ["in", "out"]
+    if args.json:
+        print(json.dumps({"id": data["id"], **{d: data[d] for d in directions}}, indent=2))
+    else:
+        for direction in directions:
+            for target in data[direction]:
+                print(f"{direction}\t{target}")
+    return EXIT_OK
+
+
+def cmd_config_hash(args: argparse.Namespace) -> int:
+    from labbrain.confighash import config_hash, load_run_config
+    from labbrain.vault import DEFAULT_HASH_IGNORE, load_config
+
+    root = _optional_root(args)
+    ignore = DEFAULT_HASH_IGNORE if root is None else load_config(root).hash_ignore
+    try:
+        data = load_run_config(args.file)
+    except ValueError as exc:
+        raise UsageError(str(exc)) from exc
+    print(config_hash(data, ignore))
+    return EXIT_OK
+
+
+def cmd_schema(args: argparse.Namespace) -> int:
+    from labbrain.schema import json_schema
+
+    print(json.dumps(json_schema(args.type), indent=2))
+    return EXIT_OK
+
+
+# --- parser -----------------------------------------------------------------------
+
+
+def _add_format(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--format", choices=("text", "json", "github"), default="text")
+    parser.add_argument(
+        "--json", dest="format", action="store_const", const="json", help="same as --format json"
+    )
+
+
+def _add_id_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("type", choices=NOTE_TYPES)
+    parser.add_argument("--title", default="")
+    parser.add_argument("--author", default=None)
+    parser.add_argument("--agent", default="", help="handoff IDs: agent name (default: author)")
+    parser.add_argument("--first-author", default="", help="literature IDs: first author surname")
+    parser.add_argument("--year", type=int, help="literature IDs: publication year")
+    parser.add_argument("--name", default="", help="protocol IDs: optional EVAL-v<N>-<name>")
+    parser.add_argument("--at", default=None, help="ISO datetime to use instead of now")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="labbrain", description="Tools for lab-brain vaults.")
+    parser.add_argument("--version", action="version", version=f"labbrain {__version__}")
+    parser.add_argument("--vault", type=Path, help="vault root (overrides LABBRAIN_VAULT)")
+    # Subcommands accept --vault too, because pre-commit appends hook args after the
+    # subcommand. SUPPRESS keeps a subcommand from resetting a top-level --vault.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--vault", type=Path, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    def add(name: str, help_text: str) -> argparse.ArgumentParser:
+        return sub.add_parser(name, help=help_text, parents=[common])
+
+    vault = add("vault", "vault commands")
+    vault_sub = vault.add_subparsers(dest="vault_command", required=True)
+    root_cmd = vault_sub.add_parser("root", help="print the vault root", parents=[common])
+    root_cmd.set_defaults(func=cmd_vault_root)
+
+    p = add("config", "print the resolved config as JSON")
+    p.add_argument("--key", help="dotted key, e.g. tracker.backend")
+    p.set_defaults(func=cmd_config)
+
+    p = add("new-id", "print a fresh, collision-free ID")
+    _add_id_options(p)
+    p.set_defaults(func=cmd_new_id)
+
+    p = add("new", "create a skeleton note and print its path")
+    _add_id_options(p)
+    p.add_argument("--link", action="append", default=[], help="ID to put in `links` (repeatable)")
+    p.set_defaults(func=cmd_new)
+
+    p = add("validate", "check single files (used by the write hook)")
+    p.add_argument("paths", nargs="+", type=Path)
+    _add_format(p)
+    p.set_defaults(func=cmd_validate)
+
+    p = add("sync", "propagate supersession and freeze referenced protocols")
+    p.add_argument("--dry-run", action="store_true")
+    _add_format(p)
+    p.set_defaults(func=cmd_sync)
+
+    p = add("index", "regenerate index.md")
+    p.add_argument("--check", action="store_true", help="exit 1 if index.md would change")
+    p.set_defaults(func=cmd_index)
+
+    p = add("log", "append a line to today's log")
+    p.add_argument("text")
+    p.add_argument("--author")
+    p.set_defaults(func=cmd_log)
+
+    p = add("lint", "run every lint rule over the vault")
+    p.add_argument("--base", default="HEAD", help="git revision frozen-edit compares against")
+    p.add_argument("--rule", action="append", default=[], help="run only this rule (repeatable)")
+    _add_format(p)
+    p.set_defaults(func=cmd_lint)
+
+    p = add("phi-scan", "scan files or directories for PHI")
+    p.add_argument("paths", nargs="+", type=Path)
+    _add_format(p)
+    p.set_defaults(func=cmd_phi_scan)
+
+    p = add("list", "list notes")
+    p.add_argument("--type", dest="note_type", choices=NOTE_TYPES)
+    p.add_argument("--status")
+    p.add_argument("--tag")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_list)
+
+    p = add("links", "inbound and outbound links of a note")
+    p.add_argument("id")
+    direction = p.add_mutually_exclusive_group()
+    direction.add_argument("--in", dest="direction", action="store_const", const="in")
+    direction.add_argument("--out", dest="direction", action="store_const", const="out")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_links, direction=None)
+
+    p = add("config-hash", "hash a run config the way experiments record it")
+    p.add_argument("file", type=Path)
+    p.set_defaults(func=cmd_config_hash)
+
+    p = add("schema", "print the JSON Schema of the frontmatter models")
+    p.add_argument("type", nargs="?", choices=NOTE_TYPES)
+    p.set_defaults(func=cmd_schema)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    from labbrain.vault import ConfigError, VaultNotFound
+
+    try:
+        return int(args.func(args))
+    except (VaultNotFound, ConfigError, UsageError) as exc:
+        print(f"labbrain: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+
+
+def run() -> None:
+    sys.exit(main())

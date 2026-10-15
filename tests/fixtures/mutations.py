@@ -126,3 +126,37 @@ def missing_future_agents_block(vault: Path) -> None:
         "trust the experiment notes over this page.\n\n",
         "",
     )
+
+
+# --- protocol and claim rules ------------------------------------------------------
+
+
+@mutation("protocol-missing")
+def protocol_missing(vault: Path) -> None:
+    """Done experiment loses `protocol`; EVAL-v2 keeps inbound links from the baseline,
+    the claim and the decision, and the claim's evidence is the baseline."""
+    replace(vault, SMOOTHING, "protocol: EVAL-v2\n", "")
+
+
+@mutation("cross-protocol")
+def cross_protocol(vault: Path) -> None:
+    """Claim moves to EVAL-v1, which nothing declares comparable with EVAL-v2."""
+    replace(vault, CLAIM, "protocol: EVAL-v2", "protocol: EVAL-v1")
+
+
+@mutation("claim-stale")
+def claim_stale_failed_evidence(vault: Path) -> None:
+    """The claim's evidence experiment is now `failed`. EVAL-v2 is still referenced by the
+    other done experiment, so sync has nothing to do."""
+    replace(vault, BASELINE, "status: done", "status: failed")
+
+
+@mutation("duplicate-config")
+def duplicate_config(vault: Path) -> None:
+    """Both done experiments share a config hash and protocol and neither supersedes."""
+    replace(
+        vault,
+        SMOOTHING,
+        'config_hash: "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"',
+        'config_hash: "sha256:3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b"',
+    )

@@ -29,11 +29,11 @@ WINDOW = 30
 _MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?"
 _HAS_DIGIT = re.compile(r"\d")
 _DIGITS_6_12 = re.compile(r"(?<!\d)\d{6,12}(?!\d)")
-# `record` counts only as "medical record" or followed by no/no./number/#; `#` takes
-# no trailing \b, which could never match before a space or a digit.
+# `record` counts only as "medical record(s)" or followed by no/no./number/#; `#` takes
+# no trailing \b, which could never match before a space or a digit. Plurals count.
 _MRN_CONTEXT = re.compile(
-    r"(?i)\b(?:mrn\b|medical\s+record\b|record\s*(?:no\b\.?|number\b|#)"
-    r"|patient[\s_-]*id\b|chart\b)"
+    r"(?i)\b(?:mrns?\b|medical\s+records?\b|records?\s*(?:nos?\b\.?|numbers?\b|#)"
+    r"|patient[\s_-]*ids?\b|charts?\b)"
 )
 _DATE = re.compile(
     r"(?i)\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{2,4}|\d{1,2}-\d{1,2}-\d{4}"
@@ -68,6 +68,14 @@ _CELL_COUNT = re.compile(r"\A(\d{1,7})(?:\s*\(.*\))?\Z")
 
 PERSON_HEADERS = frozenset(
     {"n", "count", "patients", "subjects", "participants", "individuals", "cases"}
+)
+_PEOPLE = r"(?:patients|subjects|participants|individuals|cases|persons|people)"
+# Table headers of person-count columns beyond PERSON_HEADERS: "n (%)", "No. of
+# patients", "Number of subjects", "n patients", "Patients, n (%)". A bare "No." or
+# "Number" is a row index, not a count of people.
+_PERSON_HEADER = re.compile(
+    rf"(?:n|count|(?:n|no\.?|number|count)\s+(?:of\s+)?{_PEOPLE}|{_PEOPLE}(?:\s*,?\s*n)?)"
+    r"(?:\s*\(\s*%\s*\))?"
 )
 # Units after `n = k` that are not people. "samples" is deliberately absent: in
 # clinical work it often means patients' samples.
@@ -186,6 +194,11 @@ def _cells(line: str) -> list[tuple[int, str]]:
     return cells
 
 
+def _is_person_header(header: str) -> bool:
+    """`header` is lower-cased and stripped of emphasis markers."""
+    return header in PERSON_HEADERS or _PERSON_HEADER.fullmatch(header) is not None
+
+
 def _table_small_cells(lines: list[str], min_cell: int) -> Iterator[tuple[int, int, int]]:
     i = 0
     while i < len(lines) - 1:
@@ -193,7 +206,7 @@ def _table_small_cells(lines: list[str], min_cell: int) -> Iterator[tuple[int, i
             i += 1
             continue
         headers = [text.strip("*_ ").lower() for _, text in _cells(lines[i])]
-        columns = {k for k, header in enumerate(headers) if header in PERSON_HEADERS}
+        columns = {k for k, header in enumerate(headers) if _is_person_header(header)}
         j = i + 2
         while j < len(lines) and "|" in lines[j]:
             cells = _cells(lines[j]) if columns else []

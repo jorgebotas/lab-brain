@@ -134,6 +134,33 @@ def test_table_small_cells_report_cell_column() -> None:
     assert [(h.rule, h.line, h.col) for h in hits] == [("phi-small-cell", 3, 7)]
 
 
+@pytest.mark.parametrize(
+    "header",
+    [
+        "n (%)",
+        "N (%)",
+        "n(%)",
+        "No. of patients",
+        "no of subjects",
+        "Number of participants",
+        "n patients",
+        "Patients, n (%)",
+        "patients (%)",
+        "**Cases**",
+    ],
+)
+def test_table_person_count_headers(header: str) -> None:
+    text = f"| arm | {header} |\n|---|---|\n| a | 4 (12%) |\n| b | 40 (88%) |\n"
+    hits = scan_text(text, ScanSettings())
+    assert [(h.rule, h.line, h.col) for h in hits] == [("phi-small-cell", 3, 7)]
+
+
+@pytest.mark.parametrize("header", ["No.", "Number", "seed (%)", "accuracy (%)", "n layers"])
+def test_table_headers_that_are_not_person_counts(header: str) -> None:
+    text = f"| arm | {header} |\n|---|---|\n| a | 4 |\n"
+    assert scan_text(text, ScanSettings()) == []
+
+
 def test_denylist_names(tmp_path: Path) -> None:
     root = make_vault(tmp_path)
     write(root, ".labbrain/phi-denylist.txt", "# synthetic\nZebulon Quixley\n")
@@ -318,6 +345,12 @@ MRN_CONTEXTS = [
     "Record #{}",
     "record no. {}",
     "record number {}",
+    "Medical records {}",
+    "medical records: {}",
+    "Patient IDs: {}",
+    "patient ids {}",
+    "MRNs {}",
+    "record nos. {}",
 ]
 
 

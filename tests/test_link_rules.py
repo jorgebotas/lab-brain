@@ -51,3 +51,28 @@ def test_orphans_and_exemptions(tmp_path: Path) -> None:
     assert rules_fired(root, "orphan") == [
         ("orphan", "decisions/ADR-20261001-b.md", "no inbound links")
     ]
+
+
+def test_frontmatter_values_never_resolve_as_files(tmp_path: Path) -> None:
+    root = make_vault(tmp_path)
+    write(
+        root,
+        "decisions/ADR-20261001-x.md",
+        note_text("ADR-20261001-x", "decision", links=["figures/roc.png"]),
+    )
+    write(root, "figures/roc.png", "png")
+    assert {f[2] for f in rules_fired(root, "broken-link")} == {
+        "links: unresolved link [[figures/roc.png]]"
+    }
+
+
+def test_unresolved_non_id_targets_are_not_echoed(tmp_path: Path) -> None:
+    root = make_vault(tmp_path)
+    write(
+        root,
+        "decisions/ADR-20261001-x.md",
+        note_text("ADR-20261001-x", "decision", links=["patient John Doe"]),
+    )
+    messages = [f[2] for f in rules_fired(root, "broken-link")]
+    assert messages == ["links: unresolved link [[<not a valid note ID>]]"]
+    assert not any("John" in m or "Doe" in m for m in messages)

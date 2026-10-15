@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 from collections import defaultdict
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -16,7 +17,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from labbrain import __version__
 from labbrain.ids import DEFAULT_PREFIXES
 from labbrain.layout import CONFIG_PATH, iter_note_files
-from labbrain.notes import Note, parse_note, safe_load
+from labbrain.notes import Note, parse_read_note, read_note_text, safe_load
+from labbrain.readpool import ordered_map
 
 ENV_VAULT = "LABBRAIN_VAULT"
 ENV_NOW = "LABBRAIN_NOW"
@@ -225,10 +227,14 @@ class Vault:
         config = config or load_config(root)
         groups: dict[str, list[Note]] = defaultdict(list)
         by_rel: dict[str, Note] = {}
-        for path in iter_note_files(root):
-            note = parse_note(path, root)
-            groups[note.stem].append(note)
-            by_rel[note.rel] = note
+        paths = list(iter_note_files(root))
+        # Reads run in worker threads; parsing stays here, in sorted path order, as
+        # results arrive (ordered_map yields in input order), so every ordering is unchanged.
+        with closing(ordered_map(read_note_text, paths)) as texts:
+            for path, text in zip(paths, texts, strict=True):
+                note = parse_read_note(path, root, text)
+                groups[note.stem].append(note)
+                by_rel[note.rel] = note
         inbound: dict[str, set[str]] = defaultdict(set)
         outbound: dict[str, set[str]] = defaultdict(set)
         for note in by_rel.values():

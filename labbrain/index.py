@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 from labbrain.layout import INDEX_FILE
-from labbrain.notes import Note, atomic_write, future_agents_end, iter_body_lines
+from labbrain.notes import Note, atomic_write, body_lines, future_agents_end
 from labbrain.vault import Vault
 
 TYPE_ORDER: tuple[str, ...] = (
@@ -37,7 +37,7 @@ _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 
 def summary(note: Note) -> str:
     """First sentence of the first paragraph after the For-future-agents block."""
-    lines = [line for _, line in iter_body_lines(note)]
+    lines = [line for _, line in body_lines(note)]
     i = future_agents_end(lines) or 0
     paragraph: list[str] = []
     for line in lines[i:]:

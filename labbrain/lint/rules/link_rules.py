@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import errno
+import os
+from collections.abc import Callable, Iterator
+from pathlib import Path
 
 from labbrain.findings import ERROR, WARNING, Finding, display_id
 from labbrain.lint import LintContext, rule
@@ -10,15 +13,55 @@ from labbrain.lint import LintContext, rule
 ORPHAN_EXEMPT = frozenset({"idea", "handoff"})
 
 
+_FILENAMES_KEY = "link_rules.filenames"
+
+
+# Errors pathlib treats as "does not exist" (Python 3.11 pathlib._IGNORED_ERRNOS).
+_MISSING_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP})
+
+
+def _entry_test(test: Callable[[], bool]) -> bool:
+    """Run a DirEntry type test like pathlib: a missing target is False, other errors raise."""
+    try:
+        return test()
+    except OSError as exc:
+        if exc.errno in _MISSING_ERRNOS:
+            return False
+        raise
+
+
+def _walk_filenames(root: Path) -> set[str]:
+    """Names of regular files (or symlinks to them) under `root`.
+
+    Descends only real directories whose name does not start with a dot (.git,
+    .obsidian, .labbrain, ...), and never collects an entry named `.git`. Like the
+    `rglob` it replaces, a directory that cannot be listed for lack of permission is
+    skipped; any other error propagates.
+    """
+    names: set[str] = set()
+    stack = [os.fspath(root)]
+    while stack:
+        here = stack.pop()
+        try:
+            with os.scandir(here) as listing:
+                entries = list(listing)
+        except PermissionError:
+            continue
+        for entry in entries:
+            if entry.name == ".git":
+                continue
+            if _entry_test(lambda e=entry: e.is_dir(follow_symlinks=False)):
+                if not entry.name.startswith("."):
+                    stack.append(entry.path)
+            elif _entry_test(entry.is_file):  # follows symlinks, like Path.is_file
+                names.add(entry.name)
+    return names
+
+
 def _vault_filenames(ctx: LintContext) -> set[str]:
-    if "filenames" not in ctx.cache:
-        root = ctx.vault.root
-        ctx.cache["filenames"] = {
-            p.name
-            for p in root.rglob("*")
-            if p.is_file() and ".git" not in p.relative_to(root).parts
-        }
-    return ctx.cache["filenames"]
+    if _FILENAMES_KEY not in ctx.cache:
+        ctx.cache[_FILENAMES_KEY] = _walk_filenames(ctx.vault.root)
+    return ctx.cache[_FILENAMES_KEY]
 
 
 def _path_exists(ctx: LintContext, target: str) -> bool:

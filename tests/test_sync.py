@@ -7,6 +7,7 @@ from fixtures.mutations import BASELINE, EVAL_V2, SMOOTHING, replace
 from helpers import TODAY, body_for, make_vault, note_text, write
 
 from labbrain import lint
+from labbrain.notes import render_note
 from labbrain.sync import Change, apply, plan
 from labbrain.vault import Vault
 
@@ -109,3 +110,40 @@ def test_conflict_message_hides_a_value_that_is_not_id_shaped(tmp_path: Path) ->
     _, conflicts = plan(Vault.load(root))
     assert "Jane" not in conflicts[0].message
     assert "already superseded by <not a valid note ID>" in conflicts[0].message
+
+
+def test_protocol_target_cannot_be_superseded(tmp_path: Path) -> None:
+    root = make_vault(tmp_path)
+    write(
+        root,
+        "protocols/EVAL-v1.md",
+        note_text("EVAL-v1", "protocol", status="draft", body=body_for("protocol")),
+    )
+    write(
+        root,
+        "decisions/ADR-20261002-b.md",
+        note_text("ADR-20261002-b", "decision", supersedes="EVAL-v1", body=body_for("decision")),
+    )
+    vault = Vault.load(root)
+    changes, conflicts = plan(vault)
+    assert changes == []
+    assert [(c.note_id, c.rel) for c in conflicts] == [("EVAL-v1", "protocols/EVAL-v1.md")]
+    assert "EVAL-v1 is a protocol and cannot be superseded" in conflicts[0].message
+    findings = lint.run(vault, today=TODAY, only=["sync-pending"])
+    assert [(f.severity, f.path) for f in findings] == [("error", "protocols/EVAL-v1.md")]
+
+
+def test_target_of_unknown_type_cannot_be_superseded(tmp_path: Path) -> None:
+    root = make_vault(tmp_path)
+    old = render_note({"id": "ADR-20261001-old", "type": "Jane Doe", "status": "accepted"}, "")
+    write(root, "decisions/ADR-20261001-old.md", old)
+    write(
+        root,
+        "decisions/ADR-20261002-b.md",
+        note_text("ADR-20261002-b", "decision", supersedes="ADR-20261001-old"),
+    )
+    changes, conflicts = plan(Vault.load(root))
+    assert changes == []
+    assert [c.note_id for c in conflicts] == ["ADR-20261001-old"]
+    assert "cannot be superseded" in conflicts[0].message
+    assert "Jane" not in conflicts[0].message

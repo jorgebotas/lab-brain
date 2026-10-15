@@ -13,6 +13,7 @@ from datetime import date
 from typing import Any
 
 from labbrain.notes import update_frontmatter
+from labbrain.schema import MODELS
 from labbrain.vault import Vault
 
 _ID_SHAPED = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,79}$")
@@ -23,6 +24,12 @@ def _shown_id(vault: Vault, value: str) -> str:
     if vault.get(value) is not None or _ID_SHAPED.match(value):
         return value
     return "<not a valid note ID>"
+
+
+def _supersedable(note_type: str | None) -> bool:
+    """Only types whose schema has a superseded_by field (and so a superseded status)."""
+    model = MODELS.get(note_type) if note_type is not None else None
+    return model is not None and "superseded_by" in model.model_fields
 
 
 @dataclass(frozen=True)
@@ -53,6 +60,11 @@ def plan(vault: Vault) -> tuple[list[Change], list[Conflict]]:
         old = vault.get(old_id)
         if old is None:
             continue  # broken-link reports it
+        if not _supersedable(old.type):
+            kind = f"a {old.type}" if old.type in MODELS else "of no known type"
+            message = f"{old_id} is {kind} and cannot be superseded"
+            conflicts.append(Conflict(old_id, old.rel, message))
+            continue
         news = sorted(successors[old_id])
         if len(news) > 1:
             message = f"{old_id} is superseded by more than one note: {', '.join(news)}"

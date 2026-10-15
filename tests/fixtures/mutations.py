@@ -219,4 +219,15 @@ def duplicate_config(vault: Path) -> None:
         SMOOTHING,
         'config_hash: "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"',
         'config_hash: "sha256:3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b"',
+# --- index-stale ---------------------------------------------------------------------
+
+
+@mutation("index-stale", keep_index=True)
+def index_stale_title(vault: Path) -> None:
+    """The concept's title changes after the index was generated; titles are free text."""
+    replace(
+        vault,
+        CONCEPT,
+        'title: "Label smoothing and calibration"',
+        'title: "Label smoothing, calibration and confidence"',
     )

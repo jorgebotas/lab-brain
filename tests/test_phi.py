@@ -430,3 +430,12 @@ def test_pre_read_texts_are_used(tmp_path: Path) -> None:
     texts = {path: f"Call {phone()}.\n"}
     findings = scan([root], root=root, settings=ScanSettings(), allow=frozenset(), texts=texts)
     assert [(f.path, f.rule) for f in findings] == [("concepts/a.md", "phi-phone")]
+
+
+def test_unreadable_allowlist_is_an_allowlist_error_without_content(tmp_path: Path) -> None:
+    root = make_vault(tmp_path)
+    (root / ".labbrain" / "phi-allow.yaml").write_bytes(b"- file: \xff\xfe sentinelvalue\n")
+    with pytest.raises(AllowlistError) as info:
+        load_allowlist(root)
+    assert "sentinelvalue" not in str(info.value)
+    assert info.value.__cause__ is None and info.value.__suppress_context__

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable
+from collections.abc import Container, Iterable
 from dataclasses import dataclass
 
 ERROR = "error"
@@ -28,6 +28,20 @@ _MAX_MESSAGE = 300
 # cost. The token straddling the cut is dropped whole, so no fragment of an identifier can
 # escape redaction, however much whitespace collapsing later shrinks the text.
 _PRE_CAP = 4 * _MAX_MESSAGE
+
+_ID_SHAPED = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,79}\Z")
+NOT_AN_ID = "<not a valid note ID>"
+
+
+def display_id(target: str, known: Container[str] | None = None) -> str:
+    """A link target or ID-bearing field value, safe to print.
+
+    Note IDs identify notes and may be echoed. Anything else may be free text (a
+    frontmatter value, a name, an identifier) and is shown as a fixed placeholder.
+    """
+    if (known is not None and target in known) or _ID_SHAPED.match(target):
+        return target
+    return NOT_AN_ID
 
 
 def sanitize(message: str) -> str:

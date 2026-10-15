@@ -357,8 +357,12 @@ def load_allowlist(root: Path | None) -> frozenset[tuple[str, str, str]]:
         return frozenset()
     try:
         raw = safe_load((root / ALLOWLIST_PATH).read_text(encoding="utf-8"))
-    except yaml.YAMLError as exc:
-        raise AllowlistError(f"{ALLOWLIST_PATH} is not valid YAML") from exc
+    except OSError:
+        raise AllowlistError(f"cannot read {ALLOWLIST_PATH}") from None
+    except UnicodeDecodeError:
+        raise AllowlistError(f"{ALLOWLIST_PATH} is not valid UTF-8") from None
+    except yaml.YAMLError:
+        raise AllowlistError(f"{ALLOWLIST_PATH} is not valid YAML") from None
     raw = [] if raw is None else raw
     if not isinstance(raw, list):
         raise AllowlistError(f"{ALLOWLIST_PATH} must be a YAML list")

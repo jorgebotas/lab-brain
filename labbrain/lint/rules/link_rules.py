@@ -2,22 +2,12 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterator
 
-from labbrain.findings import ERROR, WARNING, Finding
+from labbrain.findings import ERROR, WARNING, Finding, display_id
 from labbrain.lint import LintContext, rule
 
 ORPHAN_EXEMPT = frozenset({"idea", "handoff"})
-
-# Note IDs identify notes and may be echoed; any other unresolved target is arbitrary
-# text (possibly a frontmatter value) and is never rendered.
-_ECHOABLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,79}$")
-_NOT_AN_ID = "<not a valid note ID>"
-
-
-def _render(target: str) -> str:
-    return target if _ECHOABLE_RE.match(target) else _NOT_AN_ID
 
 
 def _vault_filenames(ctx: LintContext) -> set[str]:
@@ -44,10 +34,10 @@ def broken_link(ctx: LintContext) -> Iterator[Finding]:
             # Only body wikilinks may name files; every frontmatter value must be a note ID.
             if ref.field == "body" and ref.is_path:
                 if not _path_exists(ctx, ref.target):
-                    message = f"{ref.field}: missing file {_render(ref.target)}"
+                    message = f"{ref.field}: missing file {display_id(ref.target)}"
                     yield Finding(note.rel, ref.line, "broken-link", ERROR, message)
             elif ref.target not in ctx.vault.notes:
-                message = f"{ref.field}: unresolved link [[{_render(ref.target)}]]"
+                message = f"{ref.field}: unresolved link [[{display_id(ref.target)}]]"
                 yield Finding(note.rel, ref.line, "broken-link", ERROR, message)
 
 

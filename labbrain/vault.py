@@ -68,6 +68,21 @@ def find_root(start: Path | None = None, explicit: Path | str | None = None) -> 
     )
 
 
+def find_root_or_none(start: Path | None = None, explicit: Path | str | None = None) -> Path | None:
+    """Like find_root, but None when auto-discovery finds no vault.
+
+    A --vault or LABBRAIN_VAULT that names a non-vault still raises VaultNotFound: the
+    caller asked for that vault, so falling back to defaults would silently drop its
+    settings (PHI patterns, allowlist, hash_ignore).
+    """
+    try:
+        return find_root(start=start, explicit=explicit)
+    except VaultNotFound:
+        if explicit or os.environ.get(ENV_VAULT):
+            raise
+        return None
+
+
 DEFAULT_HASH_IGNORE: list[str] = [
     "seed",
     "*.seed",

@@ -12,6 +12,7 @@ from labbrain.vault import (
     Vault,
     VaultNotFound,
     find_root,
+    find_root_or_none,
     load_config,
     now,
     today,
@@ -45,6 +46,19 @@ def test_find_root_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setenv("LABBRAIN_VAULT", str(tmp_path))
     with pytest.raises(VaultNotFound, match="LABBRAIN_VAULT"):
         find_root()
+
+
+def test_find_root_or_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = make_vault(tmp_path / "v")
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert find_root_or_none(start=root) == root.resolve()
+    assert find_root_or_none(start=plain) is None
+    with pytest.raises(VaultNotFound, match="--vault"):
+        find_root_or_none(start=root, explicit=plain)
+    monkeypatch.setenv("LABBRAIN_VAULT", str(plain))
+    with pytest.raises(VaultNotFound, match="LABBRAIN_VAULT"):
+        find_root_or_none(start=root)
 
 
 def test_now_honours_env(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -213,3 +213,74 @@ def test_explicit_non_vault_is_a_usage_error_for_fallback_commands(
         code, _, err = run(capsys, *args)
         assert code == 2 and "LABBRAIN_VAULT points to" in err, args
         monkeypatch.delenv("LABBRAIN_VAULT")
+
+
+def test_links_output_never_echoes_free_text_targets(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from test_query import probe_vault
+
+    root, secrets = probe_vault(tmp_path / "v")
+    monkeypatch.setenv("LABBRAIN_VAULT", str(root))
+    for args in (("links", "probe"), ("links", "probe", "--out", "--json")):
+        code, out, err = run(capsys, *args)
+        assert code == 0 and "<not a valid note ID>" in out, args
+        assert not any(secret in out + err for secret in secrets), args
+
+
+def test_unreadable_allowlist_exits_2_without_traceback_or_content(
+    vault_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (vault_dir / ".labbrain" / "phi-allow.yaml").write_bytes(b"- file: \xff\xfe sentinelvalue\n")
+    for args in (("phi-scan", str(vault_dir)), ("lint",)):
+        code, out, err = run(capsys, *args)
+        assert code == 2, args
+        assert "phi-allow.yaml" in err and "Traceback" not in err, args
+        assert "sentinelvalue" not in out + err, args
+
+
+def test_unexpected_errors_are_reported_without_details(
+    vault_dir: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from labbrain import cli
+
+    def boom(args: object) -> int:
+        raise RuntimeError("secret detail 31415926")
+
+    monkeypatch.setattr(cli, "cmd_schema", boom)
+    code, out, err = run(capsys, "schema")
+    assert (code, out, err) == (2, "", "labbrain: internal error (RuntimeError)\n")
+
+    def broken_pipe(args: object) -> int:
+        raise BrokenPipeError
+
+    monkeypatch.setattr(cli, "cmd_schema", broken_pipe)
+    assert run(capsys, "schema") == (0, "", "")
+
+
+def test_every_vault_command_warns_once_about_engine_version(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    newer = make_vault(tmp_path / "newer", MIN_CONFIG + "engine_min_version: 99.0.0\n")
+    first = newer / "concepts" / "a.md"
+    first.parent.mkdir()
+    first.write_text("Text.\n")
+    (newer / "concepts" / "b.md").write_text("Text.\n")
+    run_config = tmp_path / "run.yaml"
+    run_config.write_text("lr: 0.001\n")
+    monkeypatch.setenv("LABBRAIN_VAULT", str(newer))
+    for args in (
+        ("vault", "root"),
+        ("config",),
+        ("new-id", "experiment", "--title", "x"),
+        ("validate", str(first), str(newer / "concepts" / "b.md")),
+        ("sync",),
+        ("index", "--check"),
+        ("log", "exp-log: ran", "--author", "alice"),
+        ("lint",),
+        ("phi-scan", str(newer / "concepts")),
+        ("list",),
+        ("config-hash", str(run_config)),
+    ):
+        err = run(capsys, *args)[2]
+        assert err.count("engine_min_version 99.0.0") == 1, (args, err)

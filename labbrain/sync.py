@@ -6,24 +6,15 @@ output never trips frozen-edit.
 
 from __future__ import annotations
 
-import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
+from labbrain.findings import display_id
 from labbrain.notes import update_frontmatter
 from labbrain.schema import MODELS
 from labbrain.vault import Vault
-
-_ID_SHAPED = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,79}$")
-
-
-def _shown_id(vault: Vault, value: str) -> str:
-    """A field value is printed only if it names a note or at least looks like an ID."""
-    if vault.get(value) is not None or _ID_SHAPED.match(value):
-        return value
-    return "<not a valid note ID>"
 
 
 def _supersedable(note_type: str | None) -> bool:
@@ -74,7 +65,7 @@ def plan(vault: Vault) -> tuple[list[Change], list[Conflict]]:
         current = old.get_str("superseded_by")
         if current and current != new:
             message = (
-                f"{old_id} is already superseded by {_shown_id(vault, current)}; "
+                f"{old_id} is already superseded by {display_id(current, vault.notes)}; "
                 f"{new} also claims to supersede it"
             )
             conflicts.append(Conflict(old_id, old.rel, message))

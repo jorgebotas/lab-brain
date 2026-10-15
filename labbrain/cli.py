@@ -34,29 +34,26 @@ def _root(args: argparse.Namespace) -> Path:
     return find_root(explicit=args.vault)
 
 
-def _optional_root(args: argparse.Namespace, start: Path | None = None) -> Path | None:
-    """The vault root, or None when auto-discovery finds none.
-
-    An explicit --vault or LABBRAIN_VAULT that names a non-vault is still an error
-    (exit 2), as in validate: falling back to defaults there would silently drop the
-    vault's PHI settings or hash_ignore.
-    """
-    from labbrain.vault import ENV_VAULT, VaultNotFound, find_root
-
-    try:
-        return find_root(start=start, explicit=args.vault)
-    except VaultNotFound:
-        if args.vault or os.environ.get(ENV_VAULT):
-            raise
-        return None
-
-
 def _warn_version(config: Any) -> None:
     from labbrain.vault import version_warning
 
     warning = version_warning(config)
     if warning:
         print(f"labbrain: warning: {warning}", file=sys.stderr)
+
+
+def _warn_root(root: Path) -> None:
+    """The version warning for commands that need only the root (vault root, log).
+
+    A broken config is left for the commands that use it to report.
+    """
+    from labbrain.vault import ConfigError, load_config
+
+    try:
+        config = load_config(root)
+    except ConfigError:
+        return
+    _warn_version(config)
 
 
 def _config(args: argparse.Namespace) -> tuple[Path, Any]:
@@ -106,7 +103,9 @@ def _author(args: argparse.Namespace) -> str:
 
 
 def cmd_vault_root(args: argparse.Namespace) -> int:
-    print(_root(args))
+    root = _root(args)
+    _warn_root(root)
+    print(root)
     return EXIT_OK
 
 
@@ -179,7 +178,11 @@ def cmd_new(args: argparse.Namespace) -> int:
 def cmd_validate(args: argparse.Namespace) -> int:
     from labbrain.validate import validate_paths
 
-    return _emit(validate_paths(args.paths, vault=args.vault), args.format)
+    configs: dict[Path, Any] = {}
+    findings = validate_paths(args.paths, vault=args.vault, configs=configs)
+    for config in configs.values():
+        _warn_version(config)
+    return _emit(findings, args.format)
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
@@ -221,8 +224,10 @@ def cmd_log(args: argparse.Namespace) -> int:
     from labbrain.log import append
     from labbrain.vault import now
 
+    root = _root(args)
+    _warn_root(root)
     try:
-        path = append(_root(args), args.text, when=now(), author=args.author)
+        path = append(root, args.text, when=now(), author=args.author)
     except ValueError as exc:
         raise UsageError(str(exc)) from exc
     print(path)
@@ -242,15 +247,19 @@ def cmd_lint(args: argparse.Namespace) -> int:
 
 def cmd_phi_scan(args: argparse.Namespace) -> int:
     from labbrain.phi import ScanSettings, load_allowlist, scan
-    from labbrain.vault import default_config, load_config
+    from labbrain.vault import default_config, find_root_or_none, load_config
 
     paths = [p.expanduser().resolve() for p in args.paths]
     for path in paths:
         if not path.exists():
             raise UsageError(f"no such file or directory: {path.name}")
     start = paths[0] if paths[0].is_dir() else paths[0].parent
-    root = _optional_root(args, start)
-    config = default_config() if root is None else load_config(root)
+    root = find_root_or_none(start=start, explicit=args.vault)
+    if root is None:
+        config = default_config()
+    else:
+        config = load_config(root)
+        _warn_version(config)
     settings = ScanSettings.from_config(config, root)
     return _emit(scan(paths, root=root, settings=settings, allow=load_allowlist(root)), args.format)
 
@@ -286,10 +295,15 @@ def cmd_links(args: argparse.Namespace) -> int:
 
 def cmd_config_hash(args: argparse.Namespace) -> int:
     from labbrain.confighash import config_hash, load_run_config
-    from labbrain.vault import DEFAULT_HASH_IGNORE, load_config
+    from labbrain.vault import DEFAULT_HASH_IGNORE, find_root_or_none, load_config
 
-    root = _optional_root(args)
-    ignore = DEFAULT_HASH_IGNORE if root is None else load_config(root).hash_ignore
+    root = find_root_or_none(explicit=args.vault)
+    if root is None:
+        ignore = DEFAULT_HASH_IGNORE
+    else:
+        config = load_config(root)
+        _warn_version(config)
+        ignore = config.hash_ignore
     try:
         data = load_run_config(args.file)
     except ValueError as exc:
@@ -421,6 +435,26 @@ def main(argv: list[str] | None = None) -> int:
     except (VaultNotFound, ConfigError, UsageError) as exc:
         print(f"labbrain: {exc}", file=sys.stderr)
         return EXIT_USAGE
+    except BrokenPipeError:
+        # The reader went away (e.g. `labbrain lint | head`): stop quietly.
+        _detach_stdout()
+        return EXIT_OK
+    except Exception as exc:
+        # Only the type: messages and tracebacks can quote file content.
+        print(f"labbrain: internal error ({type(exc).__name__})", file=sys.stderr)
+        return EXIT_USAGE
+
+
+def _detach_stdout() -> None:
+    """Point stdout at /dev/null so the interpreter's final flush cannot fail again."""
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull, sys.stdout.fileno())
+        finally:
+            os.close(devnull)
+    except (OSError, ValueError):  # stdout is not a real file (e.g. captured)
+        pass
 
 
 def run() -> None:

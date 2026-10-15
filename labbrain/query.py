@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from labbrain.findings import display_id
 from labbrain.vault import Vault
 
 
@@ -42,6 +43,6 @@ def links(vault: Vault, note_id: str) -> dict[str, Any]:
         raise KeyError(note_id)
     return {
         "id": note_id,
-        "in": sorted(vault.inbound.get(note_id, set())),
-        "out": sorted(vault.outbound.get(note_id, set())),
+        "in": sorted({display_id(t, vault.notes) for t in vault.inbound.get(note_id, ())}),
+        "out": sorted({display_id(t, vault.notes) for t in vault.outbound.get(note_id, ())}),
     }

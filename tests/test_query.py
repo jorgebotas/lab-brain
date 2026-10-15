@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import random
+from pathlib import Path
+
 import pytest
-from helpers import FIXTURE
+from helpers import FIXTURE, make_vault, note_text, write
 
 from labbrain.query import links, list_notes
 from labbrain.vault import Vault
@@ -41,3 +44,32 @@ def test_links() -> None:
     }
     with pytest.raises(KeyError):
         links(vault, "nope")
+
+
+def probe_vault(root: Path) -> tuple[Path, list[str]]:
+    """A vault whose links hold identifier-like free text; returns it and the secrets."""
+    rng = random.Random(11)
+    mrn = str(rng.randrange(10_000_000, 99_999_999))
+    phone = f"{rng.randrange(200, 999)}-{rng.randrange(1000, 9999)}"
+    make_vault(root)
+    write(root, "concepts/target.md", note_text("target", "concept"))
+    write(
+        root,
+        "concepts/probe.md",
+        note_text(
+            "probe",
+            "concept",
+            body="## Definition\n\n[[target]] and [[Jane Q Doe " + phone + "]]\n\n"
+            "## For future agents\n\nText.\n",
+            links=["target", f"Patient MRN {mrn}", "EXP-20990101-not-there"],
+        ),
+    )
+    return root, [mrn, phone, "Jane"]
+
+
+def test_links_never_echo_free_text_targets(tmp_path: Path) -> None:
+    root, secrets = probe_vault(tmp_path / "v")
+    data = links(Vault.load(root), "probe")
+    assert data["out"] == ["<not a valid note ID>", "EXP-20990101-not-there", "target"]
+    assert links(Vault.load(root), "target")["in"] == ["probe"]
+    assert not any(secret in str(data) for secret in secrets)

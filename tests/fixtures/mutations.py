@@ -126,3 +126,65 @@ def missing_future_agents_block(vault: Path) -> None:
         "trust the experiment notes over this page.\n\n",
         "",
     )
+
+
+# --- broken-link / orphan ------------------------------------------------------
+
+ORPHAN_LITERATURE = """---
+id: LIT-doe2020-calibration
+type: literature
+title: "A study of calibration"
+created: 2026-10-02
+updated: 2026-10-02
+author: bob
+status: active
+tags: []
+links: []
+year: 2020
+relevance: low
+---
+## Summary
+
+A survey of calibration metrics.
+
+## Methods worth borrowing
+
+Reliability diagrams.
+
+## Results to compare against
+
+None under our protocols.
+
+## Style notes
+
+Clear figures.
+"""
+
+
+@mutation("broken-link")
+def broken_body_link(vault: Path) -> None:
+    """Concept links to an ID that does not exist; the line carries no number."""
+    replace(
+        vault,
+        CONCEPT,
+        "[[ADR-20260905-adopt-eval-v2]] · [[LIT-szegedy2016-rethinking]]",
+        "[[ADR-20260905-adopt-eval-v2]] · [[LIT-szegedy2016-rethinking]] · [[EXP-20990101-nowhere]]",
+    )
+
+
+@mutation("broken-link")
+def broken_frontmatter_link(vault: Path) -> None:
+    """Decision `links` names a missing protocol; EVAL-v2 keeps its other inbound links."""
+    replace(vault, DECISION, "links: [EVAL-v2]", "links: [EVAL-v2, EVAL-v9]")
+
+
+@mutation("broken-link")
+def broken_embed(vault: Path) -> None:
+    """Experiment embeds a figure that does not exist; path targets never touch the ID graph."""
+    replace(vault, BASELINE, "## Next\n", "## Next\n\n![[figures/roc.png]]\n")
+
+
+@mutation("orphan")
+def orphan_new_literature(vault: Path) -> None:
+    """A complete, valid literature note that nothing links to."""
+    (vault / "literature" / "LIT-doe2020-calibration.md").write_text(ORPHAN_LITERATURE)

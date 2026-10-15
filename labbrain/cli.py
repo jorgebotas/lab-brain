@@ -75,10 +75,17 @@ def _vault(args: argparse.Namespace) -> Any:
 def _emit(findings: list[Any], fmt: str) -> int:
     from labbrain.findings import exit_code, render
 
+    code = exit_code(findings)
     output = render(findings, fmt)
-    if output:
-        print(output)
-    return exit_code(findings)
+    try:
+        if output:
+            print(output)
+        sys.stdout.flush()
+    except BrokenPipeError:
+        # A closed reader (`lint | head`) must not turn error findings into success:
+        # CI shells run with pipefail.
+        _detach_stdout()
+    return code
 
 
 def _now(at: str | None) -> datetime:
@@ -431,18 +438,26 @@ def main(argv: list[str] | None = None) -> int:
     from labbrain.vault import ConfigError, VaultNotFound
 
     try:
-        return int(args.func(args))
+        code = int(args.func(args))
     except (VaultNotFound, ConfigError, UsageError) as exc:
         print(f"labbrain: {exc}", file=sys.stderr)
         return EXIT_USAGE
     except BrokenPipeError:
-        # The reader went away (e.g. `labbrain lint | head`): stop quietly.
+        # The reader went away (e.g. `labbrain list | head`) from a command without
+        # findings; finding commands keep their exit code in _emit.
         _detach_stdout()
         return EXIT_OK
     except Exception as exc:
         # Only the type: messages and tracebacks can quote file content.
         print(f"labbrain: internal error ({type(exc).__name__})", file=sys.stderr)
         return EXIT_USAGE
+    try:
+        # Flush here, not at interpreter exit, so a closed pipe cannot print
+        # "Exception ignored" and exit 120, and `index --check` keeps its 1.
+        sys.stdout.flush()
+    except BrokenPipeError:
+        _detach_stdout()
+    return code
 
 
 def _detach_stdout() -> None:

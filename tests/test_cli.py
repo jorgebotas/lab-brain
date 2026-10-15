@@ -284,3 +284,36 @@ def test_every_vault_command_warns_once_about_engine_version(
     ):
         err = run(capsys, *args)[2]
         assert err.count("engine_min_version 99.0.0") == 1, (args, err)
+
+
+def _run_into_closed_pipe(*argv: str, read_first_line: bool) -> tuple[int, str]:
+    """Run the CLI with stdout a pipe whose read end is closed early; (exit code, stderr)."""
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "labbrain", *argv],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert proc.stdout is not None and proc.stderr is not None
+    if read_first_line:
+        proc.stdout.readline()
+    proc.stdout.close()
+    err = proc.stderr.read()
+    proc.stderr.close()
+    return proc.wait(timeout=60), err
+
+
+def test_broken_pipe_keeps_the_exit_code_and_stays_quiet(vault_dir: Path) -> None:
+    # Far more output than a pipe buffer holds, so the writer is still writing at close.
+    many = [f"EXP-20990101-missing-{n}" for n in range(1500)]
+    (vault_dir / "concepts" / "many-links.md").write_text(
+        f"---\nid: many-links\ntype: concept\nlinks: [{', '.join(many)}]\n---\n"
+    )
+    code, err = _run_into_closed_pipe("lint", "--format", "github", read_first_line=True)
+    assert code == 1 and "Exception ignored" not in err and "Traceback" not in err, err
+    # Small outputs sit in the stdout buffer until the final flush.
+    for args in (("list",), ("vault", "root")):
+        code, err = _run_into_closed_pipe(*args, read_first_line=False)
+        assert code == 0 and "Exception ignored" not in err and "Traceback" not in err, (args, err)
+    code, err = _run_into_closed_pipe("index", "--check", read_first_line=False)
+    assert code == 1 and "Exception ignored" not in err and "Traceback" not in err, err

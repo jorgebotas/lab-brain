@@ -3,10 +3,12 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+import pytest
 from fixtures.mutations import BASELINE, EVAL_V2, IDEA_OPEN, SMOOTHING, replace
 from helpers import FIXTURE, TODAY, commit_all, git
 
-from labbrain import lint
+from labbrain import gitutil, lint
+from labbrain.gitutil import GitError
 from labbrain.sync import apply, plan
 from labbrain.vault import Vault
 
@@ -106,4 +108,19 @@ def test_messages_never_echo_invalid_status_or_unknown_keys(vault_dir: Path) -> 
             BASELINE,
             "status change done → <invalid status> is not allowed on a frozen experiment",
         ),
+    ]
+
+
+@pytest.mark.parametrize("failing", ["changed_files", "ls_tree", "read_blobs"])
+def test_git_failure_mid_rule_is_an_error_not_a_crash(
+    vault_dir: Path, monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    replace(vault_dir, BASELINE, "Try label smoothing.", "Try something else.")
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise GitError("git cat-file failed")
+
+    monkeypatch.setattr(gitutil, failing, fail)
+    assert frozen(vault_dir) == [
+        ("error", "", "git failed while checking frozen notes; frozen-edit could not run")
     ]

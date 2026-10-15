@@ -158,6 +158,16 @@ def frozen_edit(ctx: LintContext) -> Iterator[Finding]:
         message = f"base revision {ctx.base} not found; frozen-edit skipped"
         yield Finding("", 0, RULE, INFO, message)
         return
+    try:
+        findings = list(_check(ctx, repo, base))
+    except gitutil.GitError:
+        message = "git failed while checking frozen notes; frozen-edit could not run"
+        findings = [Finding("", 0, RULE, ERROR, message)]
+    yield from findings
+
+
+def _check(ctx: LintContext, repo: gitutil.Repo, base: str) -> Iterator[Finding]:
+    """The diff-driven checks; may raise GitError, which the rule turns into one finding."""
     changes = gitutil.changed_files(repo, base)
     for status, rel in changes:
         if rel.startswith(f"{RAW_DIR}/"):

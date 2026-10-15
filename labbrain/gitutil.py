@@ -6,6 +6,7 @@ code repository works and code changes outside the vault are ignored.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -52,8 +53,23 @@ def open_repo(vault_root: Path) -> Repo | None:
     except (OSError, subprocess.CalledProcessError):
         return None
     top = Path(out).resolve()
-    rel = vault_root.resolve().relative_to(top).as_posix()
+    vault = vault_root.resolve()
+    try:
+        rel = vault.relative_to(top).as_posix()
+    except ValueError:
+        # Spelled differently (e.g. case on macOS): find the ancestor that is the same directory.
+        ancestor = next((p for p in (vault, *vault.parents) if _same_dir(p, top)), None)
+        if ancestor is None:
+            return None
+        top, rel = ancestor, vault.relative_to(ancestor).as_posix()
     return Repo(top, "" if rel == "." else rel)
+
+
+def _same_dir(a: Path, b: Path) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
 
 
 def resolve_ref(repo: Repo, ref: str) -> str | None:

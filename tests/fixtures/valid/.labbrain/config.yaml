@@ -1,0 +1,12 @@
+project_name: Toy Image Classifier
+project_slug: toy-classifier
+owner: alice
+lab_members: [alice, bob]
+agents: [claude, codex, gemini]
+modality: image
+tracker: {backend: local, project: toy-classifier, runs_dir: runs}
+protected_data: true
+data_paths: []
+min_cell_size: 11
+engine_min_version: "0.1.0"
+inbox_max_days: 30

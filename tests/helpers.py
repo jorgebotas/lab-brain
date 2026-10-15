@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -41,3 +43,37 @@ def note_text(note_id: str, note_type: str, body: str | None = None, **fields: A
     }
     data.update(fields)
     return render_note(data, body_for(note_type) if body is None else body)
+
+
+FIXTURE = Path(__file__).parent / "fixtures" / "valid"
+PINNED_NOW = "2026-10-15T12:00:00"
+TODAY = date(2026, 10, 15)
+
+
+def git(cwd: Path, *args: str) -> str:
+    return subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=fixture",
+            "-c",
+            "user.email=fixture@invalid",
+            "-c",
+            "commit.gpgsign=false",
+            *args,
+        ],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+
+def commit_all(cwd: Path, message: str = "fixture") -> None:
+    git(cwd, "add", "-A")
+    git(cwd, "commit", "-q", "--allow-empty", "-m", message)
+
+
+def copy_fixture(dest: Path) -> Path:
+    shutil.copytree(FIXTURE, dest)
+    return dest

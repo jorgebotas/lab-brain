@@ -11,7 +11,8 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-from collections.abc import Iterable, Iterator
+import stat
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -26,8 +27,11 @@ WINDOW = 30
 _MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?"
 _HAS_DIGIT = re.compile(r"\d")
 _DIGITS_6_12 = re.compile(r"(?<!\d)\d{6,12}(?!\d)")
+# Bare `record` counts (fail closed); `recorded` and `records` do not. `#` takes no
+# trailing \b, which could never match before a space or a digit.
 _MRN_CONTEXT = re.compile(
-    r"(?i)\b(?:mrn|medical\s+record|record\s*(?:no|number|#)|patient\s*id|chart)\b"
+    r"(?i)\b(?:mrn\b|medical\s+record\b|record\b(?:\s*(?:no\b\.?|number\b|#))?"
+    r"|patient[\s_-]*id\b|chart\b)"
 )
 _DATE = re.compile(
     r"(?i)\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{2,4}|\d{1,2}-\d{1,2}-\d{4}"
@@ -48,10 +52,14 @@ _ADDRESS = re.compile(
     r"(?i:street|st|avenue|ave|road|rd|boulevard|blvd|lane|ln|drive|dr|court|ct|way|place|pl"
     r"|terrace|ter|circle|cir|parkway|pkwy|highway|hwy)\b\.?"
 )
-_INLINE_N = re.compile(r"(?<!\w)[nN]\s*=\s*(\d{1,7})(?!\d)(?:\s+([A-Za-z][A-Za-z-]*))?")
-_INLINE_COUNT = re.compile(r"(?i)\bcount\s*[:=]\s*(\d{1,7})(?!\d)")
+# A count ends where no digit, decimal or thousands-separated group follows, so
+# "1,000" and "4.5" are not read as 1 and 4.
+_NUM_END = r"(?!\d|[.,]\d)"
+_INLINE_N = re.compile(rf"(?<!\w)[nN]\s*=\s*(\d{{1,7}}){_NUM_END}(?:\s+([A-Za-z][A-Za-z-]*))?")
+_INLINE_COUNT = re.compile(rf"(?i)\bcount\s*[:=]\s*(\d{{1,7}}){_NUM_END}")
 _INLINE_PEOPLE = re.compile(
-    r"(?i)(?<![\w.])(\d{1,7})\s+(?:patients|subjects|participants|individuals|cases|persons|people)\b"
+    rf"(?i)(?<![\w.,])(\d{{1,7}}){_NUM_END}\s+"
+    r"(?:patients|subjects|participants|individuals|cases|persons|people)\b"
 )
 _TABLE_SEP = re.compile(r"^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$")
 _CELL_COUNT = re.compile(r"\A(\d{1,7})(?:\s*\(.*\))?\Z")
@@ -253,39 +261,87 @@ def in_scan_scope(rel: str) -> bool:
     return not any(p.startswith(".") or p in PHI_SKIP_DIR_NAMES for p in parts[:-1])
 
 
-def _iter_candidates(base: Path) -> Iterator[Path]:
-    """Files in scope under `base`, unread. A directory that cannot be listed is
-    yielded too, so the scan reports it instead of silently skipping it."""
-    if base.is_file():
-        yield base
+UNREADABLE = "file could not be scanned"
+OUTSIDE = "symlinked directory points outside the vault; not scanned"
+
+
+def _iter_candidates(base: Path, boundary: Path | None = None) -> Iterator[tuple[Path, str | None]]:
+    """(path, problem) for each file in scope under `base`, unread.
+
+    `problem` is None for a file to read, else the message of the finding to emit
+    instead: UNREADABLE for an entry that cannot be listed or stat'ed, OUTSIDE for
+    a symlinked directory that resolves outside `boundary` (default: `base`).
+    Symlinked directories inside the boundary are followed after every real
+    directory, so a file reachable both ways is reported at its real path; each
+    directory (st_dev, st_ino) is walked once, which also ends symlink loops.
+    """
+    try:
+        st = base.stat()
+    except OSError:
+        yield base, UNREADABLE
         return
-    unlisted: list[Path] = []
-    for dirpath, dirnames, filenames in os.walk(
-        base, onerror=lambda e: unlisted.append(base if e.filename is None else Path(e.filename))
-    ):
-        yield from unlisted
-        unlisted.clear()
-        dirnames[:] = sorted(
-            d for d in dirnames if not d.startswith(".") and d not in PHI_SKIP_DIR_NAMES
-        )
-        here = Path(dirpath)
-        for name in sorted(filenames):
-            if here == base and name in PHI_SKIP_FILES:
+    if not stat.S_ISDIR(st.st_mode):
+        yield base, None if stat.S_ISREG(st.st_mode) else UNREADABLE
+        return
+    limit = boundary if boundary is not None else base.resolve()
+    visited = {(st.st_dev, st.st_ino)}
+    real: list[Path] = [base]
+    links: list[Path] = []
+    while real or links:
+        if real:
+            here = real.pop()
+        else:
+            here = links.pop(0)
+            try:
+                st = here.stat()
+            except OSError:
+                yield here, UNREADABLE
                 continue
-            path = here / name
-            if path.is_file():
-                yield path
-    yield from unlisted
+            if (st.st_dev, st.st_ino) in visited:
+                continue
+            visited.add((st.st_dev, st.st_ino))
+        try:
+            with os.scandir(here) as listing:
+                entries = sorted(listing, key=lambda e: e.name)
+        except OSError:
+            yield here, UNREADABLE
+            continue
+        subdirs: list[Path] = []
+        for entry in entries:
+            path = here / entry.name
+            try:
+                if entry.is_dir():
+                    if entry.name.startswith(".") or entry.name in PHI_SKIP_DIR_NAMES:
+                        continue
+                    if not entry.is_symlink():
+                        sub = entry.stat()
+                        if (sub.st_dev, sub.st_ino) not in visited:
+                            visited.add((sub.st_dev, sub.st_ino))
+                            subdirs.append(path)
+                    elif path.resolve().is_relative_to(limit):
+                        links.append(path)
+                    else:
+                        yield path, OUTSIDE
+                elif entry.is_file():
+                    if not (here == base and entry.name in PHI_SKIP_FILES):
+                        yield path, None
+            except OSError:
+                yield path, UNREADABLE
+        real.extend(reversed(subdirs))
 
 
 def iter_scan_files(base: Path) -> Iterator[Path]:
-    """Text files phi-scan reads under `base`. Unreadable entries are kept (fail closed)."""
-    for path in _iter_candidates(base):
-        try:
-            if is_binary(path):
-                continue
-        except OSError:
-            pass
+    """Text files phi-scan reads under `base`. Unreadable entries are kept (fail closed);
+    symlinked directories outside `base` are not traversed."""
+    for path, problem in _iter_candidates(base):
+        if problem == OUTSIDE:
+            continue
+        if problem is None:
+            try:
+                if is_binary(path):
+                    continue
+            except OSError:
+                pass
         yield path
 
 
@@ -327,6 +383,16 @@ def _rel(path: Path, root: Path | None) -> str:
 UNREADABLE_RULE = "phi-unreadable"
 
 
+def _text_of(path: Path, texts: Mapping[Path, str] | None) -> str | None:
+    """Like _read_text, but from `texts` when it holds the file. A text with a NUL is
+    re-read from disk so the binary rule (NUL in the first 8 KB of bytes) decides."""
+    if texts is not None and not _is_pdf(path):
+        text = texts.get(path)
+        if text is not None and "\0" not in text:
+            return text
+    return _read_text(path)
+
+
 def scan(
     paths: Iterable[Path],
     *,
@@ -334,22 +400,29 @@ def scan(
     settings: ScanSettings,
     allow: frozenset[tuple[str, str, str]],
     rule_name: str | None = None,
+    texts: Mapping[Path, str] | None = None,
 ) -> list[Finding]:
+    """Findings for every text file under `paths`.
+
+    `texts` maps already-read files (as `Path`s under the resolved root, the way
+    Vault.load names notes) to their content, decoded as utf-8 with
+    errors="replace"; those files are not read again. Everything else is read
+    once from disk.
+    """
     findings = []
     resolved_root = root.resolve() if root is not None else None
     for base in paths:
         # Without a root, paths are reported as given (e.g. relative to the cwd).
         start = base.resolve() if resolved_root is not None else base
-        for path in _iter_candidates(start):
+        for path, problem in _iter_candidates(start, resolved_root):
             rel = _rel(path, resolved_root)
-            try:
-                text = _read_text(path)
-            except OSError:
-                findings.append(
-                    Finding(
-                        rel, 0, rule_name or UNREADABLE_RULE, ERROR, "file could not be scanned"
-                    )
-                )
+            if problem is None:
+                try:
+                    text = _text_of(path, texts)
+                except OSError:
+                    problem = UNREADABLE
+            if problem is not None:
+                findings.append(Finding(rel, 0, rule_name or UNREADABLE_RULE, ERROR, problem))
                 continue
             if text is None:
                 continue

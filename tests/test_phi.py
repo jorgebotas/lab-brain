@@ -109,6 +109,13 @@ def test_context_is_required() -> None:
         ("3 patients", True),
         ("count: 4", True),
         ("12 patients", False),
+        ("Excluded: n = 4.", True),
+        ("n = 1,000 cells", False),
+        ("N = 2,500", False),
+        ("n = 4.5", False),
+        ("2,005 patients", False),
+        ("count: 3,200", False),
+        ("1.5 patients", False),
     ],
 )
 def test_inline_small_cells(text: str, flagged: bool) -> None:
@@ -301,3 +308,123 @@ def test_paths_without_root_are_reported_as_given(
     monkeypatch.chdir(tmp_path)
     findings = scan([Path("src")], root=None, settings=ScanSettings(), allow=frozenset())
     assert [(f.path, f.rule) for f in findings] == [("src/leak.md", "phi-phone")]
+
+
+MRN_CONTEXTS = [
+    "Patient-ID: {}",
+    "patient-id {}",
+    "patient_id={}",
+    "record {}",
+    "record # {}",
+    "Record #{}",
+]
+
+
+@pytest.mark.parametrize("template", MRN_CONTEXTS)
+def test_mrn_context_variants(template: str) -> None:
+    value = mrn()
+    line = template.format(value)
+    hits = scan_text(line + "\n", ScanSettings())
+    assert [(h.rule, h.col, h.length) for h in hits] == [("phi-mrn", line.index(value) + 1, 8)]
+
+
+@pytest.mark.parametrize(
+    "template", ["Recorded {} events in the run.", "The records {} were merged."]
+)
+def test_mrn_context_needs_the_whole_word(template: str) -> None:
+    """Bare `record` counts as context (fail closed); `recorded` and `records` do not."""
+    assert scan_text(template.format(mrn()) + "\n", ScanSettings()) == []
+
+
+OUTSIDE = "symlinked directory points outside the vault; not scanned"
+
+
+def _rows(findings: list) -> list[tuple[str, int, str, str]]:
+    return [(f.path, f.line, f.rule, f.message) for f in findings]
+
+
+def test_symlinked_directory_inside_the_vault_is_followed(tmp_path: Path) -> None:
+    root = make_vault(tmp_path / "vault")
+    write(root, "archive/shared/a.md", f"Call {phone()}.\n")
+    write(root, "raw/keep.md", "x\n")
+    (root / "raw" / "linked").symlink_to(root / "archive" / "shared", target_is_directory=True)
+    sub = scan([root / "raw"], root=root, settings=ScanSettings(), allow=frozenset())
+    assert [(f.path, f.rule) for f in sub] == [("raw/linked/a.md", "phi-phone")]
+    # A whole-vault scan reports the file once, at its real path.
+    whole = scan([root], root=root, settings=ScanSettings(), allow=frozenset())
+    assert [(f.path, f.rule) for f in whole] == [("archive/shared/a.md", "phi-phone")]
+
+
+def test_symlinked_directory_outside_the_vault_is_reported(tmp_path: Path) -> None:
+    root = make_vault(tmp_path / "vault")
+    write(tmp_path, "ext/a.md", f"Call {phone()}.\n")
+    write(root, "raw/keep.md", "x\n")
+    (root / "raw" / "linked").symlink_to(tmp_path / "ext", target_is_directory=True)
+    for rule_name, expected in ((None, "phi-unreadable"), ("phi", "phi")):
+        findings = scan(
+            [root], root=root, settings=ScanSettings(), allow=frozenset(), rule_name=rule_name
+        )
+        assert _rows(findings) == [("raw/linked", 0, expected, OUTSIDE)]
+
+
+def test_symlink_loop_terminates(tmp_path: Path) -> None:
+    root = make_vault(tmp_path / "vault")
+    write(root, "raw/a.md", f"Call {phone()}.\n")
+    (root / "raw" / "loop").symlink_to(root / "raw", target_is_directory=True)
+    (root / "raw" / "up").symlink_to(root, target_is_directory=True)
+    findings = scan([root], root=root, settings=ScanSettings(), allow=frozenset())
+    assert [(f.path, f.rule) for f in findings] == [("raw/a.md", "phi-phone")]
+    # Scanning raw/ follows `up` into the vault but does not re-enter raw/ through it.
+    sub = scan([root / "raw"], root=root, settings=ScanSettings(), allow=frozenset())
+    assert [(f.path, f.rule) for f in sub] == [("raw/a.md", "phi-phone")]
+    # Without a vault the scanned directory is the boundary, so `up` points outside it.
+    alone = scan([root / "raw"], root=None, settings=ScanSettings(), allow=frozenset())
+    assert [(f.path, f.rule, f.message) for f in alone if f.line == 0] == [
+        ((root / "raw" / "up").as_posix(), "phi-unreadable", OUTSIDE)
+    ]
+    assert [f.rule for f in alone if f.line] == ["phi-phone"]
+
+
+@needs_permissions
+def test_unsearchable_directory_is_reported_not_raised(tmp_path: Path) -> None:
+    root = make_vault(tmp_path)
+    write(root, "locked/a.md", f"Call {phone()}.\n")
+    (root / "locked").chmod(0o444)  # r--: listable, entries cannot be stat'ed or opened
+    try:
+        findings = scan([root], root=root, settings=ScanSettings(), allow=frozenset())
+        assert _rows(findings) == [
+            ("locked/a.md", 0, "phi-unreadable", "file could not be scanned")
+        ]
+    finally:
+        (root / "locked").chmod(0o755)
+
+
+def _vault_texts(vault: Vault) -> dict[Path, str]:
+    return {n.path: n.text for n in vault.all_notes() if n.errors != ["cannot read file"]}
+
+
+def test_pre_read_texts_give_identical_findings(vault_dir: Path) -> None:
+    concept = vault_dir / "concepts" / "label-smoothing-calibration.md"
+    concept.write_text(
+        concept.read_text() + f"\nAsk the steward at {phone()}.\r\nPatient MRN {mrn()}.\n"
+    )
+    (vault_dir / "concepts" / "nul.md").write_bytes(f"x\0\nCall {phone()}.\n".encode())
+    write(vault_dir, "manuscripts/main.md", f"Patient MRN {mrn()}.\n")
+    vault = Vault.load(vault_dir)
+    kwargs = {
+        "root": vault.root,
+        "settings": ScanSettings(),
+        "allow": frozenset(),
+        "rule_name": "phi",
+    }
+    from_disk = scan([vault.root], **kwargs)
+    assert len(from_disk) == 3
+    assert scan([vault.root], texts=_vault_texts(vault), **kwargs) == from_disk
+
+
+def test_pre_read_texts_are_used(tmp_path: Path) -> None:
+    root = make_vault(tmp_path).resolve()
+    path = write(root, "concepts/a.md", "Clean on disk.\n")
+    texts = {path: f"Call {phone()}.\n"}
+    findings = scan([root], root=root, settings=ScanSettings(), allow=frozenset(), texts=texts)
+    assert [(f.path, f.rule) for f in findings] == [("concepts/a.md", "phi-phone")]

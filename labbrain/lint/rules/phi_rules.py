@@ -15,10 +15,18 @@ def phi(ctx: LintContext) -> Iterator[Finding]:
     if not config.protected_data:
         return
     root = ctx.vault.root
+    # Notes Vault.load already read are scanned from memory; a note it could not
+    # read is left to the scanner, which reports it.
+    texts = {
+        note.path: note.text
+        for note in ctx.vault.all_notes()
+        if note.errors != ["cannot read file"]
+    }
     yield from phi_scan.scan(
         [root],
         root=root,
         settings=phi_scan.ScanSettings.from_config(config, root),
         allow=phi_scan.load_allowlist(root),
         rule_name="phi",
+        texts=texts,
     )

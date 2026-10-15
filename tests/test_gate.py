@@ -31,3 +31,8 @@ def test_mutation_triggers_exactly_its_rule(vault_dir: Path, mutation: Mutation)
         commit_all(vault_dir, mutation.name)
     findings = run_lint(vault_dir)
     assert {f.rule for f in findings} == {mutation.rule}, [f.to_dict() for f in findings]
+
+
+def test_every_rule_has_a_mutation() -> None:
+    assert {m.rule for m in MUTATIONS} == set(lint.load_rules())
+    assert len(lint.load_rules()) == 16

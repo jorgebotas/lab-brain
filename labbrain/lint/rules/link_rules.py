@@ -7,7 +7,7 @@ import os
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
-from labbrain.findings import ERROR, WARNING, Finding, display_id
+from labbrain.findings import ERROR, WARNING, Finding, display_id, display_path
 from labbrain.lint import LintContext, rule
 
 ORPHAN_EXEMPT = frozenset({"idea", "handoff"})
@@ -72,15 +72,18 @@ def _path_exists(ctx: LintContext, target: str) -> bool:
 
 @rule("broken-link", ERROR, "Every wikilink and ID-bearing frontmatter value resolves")
 def broken_link(ctx: LintContext) -> Iterator[Finding]:
+    prefixes = ctx.vault.config.id_prefixes
     for note in ctx.vault.all_notes():
         for ref in note.refs:
             # Only body wikilinks may name files; every frontmatter value must be a note ID.
             if ref.field == "body" and ref.is_path:
                 if not _path_exists(ctx, ref.target):
-                    message = f"{ref.field}: missing file {display_id(ref.target)}"
+                    message = f"{ref.field}: missing file {display_path(ref.target)}"
                     yield Finding(note.rel, ref.line, "broken-link", ERROR, message)
             elif ref.target not in ctx.vault.notes:
-                message = f"{ref.field}: unresolved link [[{display_id(ref.target)}]]"
+                message = (
+                    f"{ref.field}: unresolved link [[{display_id(ref.target, prefixes=prefixes)}]]"
+                )
                 yield Finding(note.rel, ref.line, "broken-link", ERROR, message)
 
 

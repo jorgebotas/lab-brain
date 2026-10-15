@@ -73,3 +73,15 @@ def test_links_never_echo_free_text_targets(tmp_path: Path) -> None:
     assert data["out"] == ["<not a valid note ID>", "EXP-20990101-not-there", "target"]
     assert links(Vault.load(root), "target")["in"] == ["probe"]
     assert not any(secret in str(data) for secret in secrets)
+
+
+def test_links_never_echo_identifier_shaped_targets(tmp_path: Path) -> None:
+    rng = random.Random(29)
+    ssn = f"{rng.randrange(100, 899)}-{rng.randrange(10, 99)}-{rng.randrange(1000, 9999)}"
+    phone = f"{rng.randrange(200, 999)}-{rng.randrange(200, 999)}-{rng.randrange(1000, 9999)}"
+    mrn = f"MRN-{rng.randrange(10**7, 10**8)}"
+    root = make_vault(tmp_path)
+    write(root, "concepts/probe.md", note_text("probe", "concept", links=[ssn, phone, mrn]))
+    data = links(Vault.load(root), "probe")
+    assert data["out"] == ["<not a valid note ID>"]
+    assert not any(secret in str(data) for secret in (ssn, phone, mrn))

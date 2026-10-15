@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 import time
 
 import pytest
@@ -8,8 +9,10 @@ import pytest
 from labbrain.findings import (
     ERROR,
     INFO,
+    NOT_AN_ID,
     WARNING,
     Finding,
+    display_id,
     exit_code,
     render,
     sanitize,
@@ -126,3 +129,56 @@ def test_render_github_escapes() -> None:
 
 def test_render_github_empty_is_empty() -> None:
     assert render([], "github") == ""
+
+
+def _synthetic_identifiers(seed: int) -> dict[str, str]:
+    """PHI-shaped strings that are also syntactically ID- or path-shaped."""
+    rng = random.Random(seed)
+    d = lambda n: "".join(str(rng.randrange(10)) for _ in range(n))  # noqa: E731
+    return {
+        "ssn": f"{rng.randrange(100, 899)}-{d(2)}-{d(4)}",
+        "phone": f"{rng.randrange(200, 999)}-{rng.randrange(200, 999)}-{d(4)}",
+        "phone-dots": f"{rng.randrange(200, 999)}.{rng.randrange(200, 999)}.{d(4)}",
+        "mrn-prefixed": f"MRN-00{d(6)}",
+        "mrn-lower": f"mrn-00{d(6)}",
+        "mrn-underscore": f"mrn_00{d(6)}",
+        "slug-digits": f"case-{d(9)}",
+    }
+
+
+@pytest.mark.parametrize("kind", sorted(_synthetic_identifiers(5)))
+def test_sanitize_redacts_hyphen_adjacent_identifiers(kind: str) -> None:
+    value = _synthetic_identifiers(5)[kind]
+    msg = sanitize(f"unresolved link [[{value}]] and {value}")
+    digits = "".join(ch for ch in value if ch.isdigit())
+    assert value not in msg
+    assert digits[-6:] not in msg.replace("-", "").replace(".", "")
+
+
+def test_sanitize_keeps_dated_ids() -> None:
+    text = "see EXP-20261013-a, HO-20261014-1420-claude, CLM-20261001-b-2 and DS-19991231-x"
+    assert sanitize(text) == text
+
+
+@pytest.mark.parametrize("kind", sorted(_synthetic_identifiers(9)))
+def test_display_id_hides_identifier_shaped_targets(kind: str) -> None:
+    value = _synthetic_identifiers(9)[kind]
+    assert display_id(value) == NOT_AN_ID
+    assert display_id(f"EXP-20261001-{value.lower()}") == NOT_AN_ID
+
+
+def test_display_id_echoes_valid_ids_and_known_notes() -> None:
+    for valid in (
+        "EXP-20261001-baseline",
+        "EVAL-v2",
+        "EVAL-v3-holdout",
+        "LIT-szegedy2016-rethinking",
+        "HO-20261014-1420-claude",
+        "label-smoothing",
+    ):
+        assert display_id(valid) == valid
+    for invalid in ("figures/roc.png", "Jane Doe", "EXP-1", "notes.md", "X-20261001-a"):
+        assert display_id(invalid) == NOT_AN_ID
+    assert display_id("Odd Name", known={"Odd Name"}) == "Odd Name"
+    assert display_id("RUN-20261001-a", prefixes={"experiment": "RUN"}) == "RUN-20261001-a"
+    assert display_id("EXP-20261001-a", prefixes={"experiment": "RUN"}) == NOT_AN_ID

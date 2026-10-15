@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from datetime import date
 from pathlib import Path
 
@@ -147,3 +148,22 @@ def test_target_of_unknown_type_cannot_be_superseded(tmp_path: Path) -> None:
     assert [c.note_id for c in conflicts] == ["ADR-20261001-old"]
     assert "cannot be superseded" in conflicts[0].message
     assert "Jane" not in conflicts[0].message
+
+
+def test_conflict_message_hides_an_identifier_shaped_value(tmp_path: Path) -> None:
+    rng = random.Random(31)
+    ssn = f"{rng.randrange(100, 899)}-{rng.randrange(10, 99)}-{rng.randrange(1000, 9999)}"
+    root = make_vault(tmp_path)
+    write(
+        root,
+        "decisions/ADR-20261001-old.md",
+        note_text("ADR-20261001-old", "decision", status="superseded", superseded_by=ssn),
+    )
+    write(
+        root,
+        "decisions/ADR-20261002-b.md",
+        note_text("ADR-20261002-b", "decision", supersedes="ADR-20261001-old"),
+    )
+    _, conflicts = plan(Vault.load(root))
+    assert ssn not in conflicts[0].message
+    assert "already superseded by <not a valid note ID>" in conflicts[0].message

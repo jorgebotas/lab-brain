@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Container, Iterable
+from collections.abc import Container, Iterable, Mapping
 from dataclasses import dataclass
+
+from labbrain.ids import is_valid_id
+from labbrain.layout import NOTE_TYPES
 
 ERROR = "error"
 WARNING = "warning"
@@ -20,28 +23,88 @@ _SEVERITIES = (ERROR, WARNING, INFO)
 _SUMMARY_KEYS = {ERROR: "errors", WARNING: "warnings", INFO: "info"}
 _GITHUB_LEVEL = {ERROR: "error", WARNING: "warning", INFO: "notice"}
 
-_CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
-_DIGIT_RUN = re.compile(r"(?<![\w-])\d{6,}(?![\w-])")
+# C0 and C1 controls, DEL, and the bidirectional formatting characters that can make a
+# terminal show text in a different order from the bytes.
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]+")
+# Runs of six or more digits not inside a word. A run touching a hyphen or underscore
+# is redacted too (a prefixed record number, say), unless it is exactly an ID's date
+# stamp (eight digits reading as a 19xx/20xx calendar date, next to a hyphen).
+_DIGIT_RUN = re.compile(r"(?<![^\W_])\d{6,}(?![^\W_])")
+_SSN = re.compile(r"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)")
+_PHONE = re.compile(r"(?<!\d)(?:\+?1[\s.-])?(?:\(\d{3}\)\s?|\d{3}[.-])\d{3}[.-]\d{4}(?!\d)")
 _EMAIL = re.compile(r"[\w.%+-]+@[\w-]+(?:\.[\w-]+)+")
 _MAX_MESSAGE = 300
 # Inputs longer than this are cut before the regexes run, which bounds their (backtracking)
 # cost. The token straddling the cut is dropped whole, so no fragment of an identifier can
 # escape redaction, however much whitespace collapsing later shrinks the text.
 _PRE_CAP = 4 * _MAX_MESSAGE
+_REDACTED = "[redacted]"
 
 _ID_SHAPED = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,79}\Z")
 NOT_AN_ID = "<not a valid note ID>"
+NOT_A_PATH = "<not a valid file path>"
 
 
-def display_id(target: str, known: Container[str] | None = None) -> str:
+def _is_id_date_stamp(text: str, start: int, end: int) -> bool:
+    """True for an eight-digit run reading as YYYYMMDD (19xx/20xx) next to a hyphen."""
+    if end - start != 8:
+        return False
+    if not ((start and text[start - 1] == "-") or (end < len(text) and text[end] == "-")):
+        return False
+    year, month, day = (
+        int(text[start : start + 4]),
+        int(text[start + 4 : start + 6]),
+        int(text[start + 6 : end]),
+    )
+    return 1900 <= year <= 2099 and 1 <= month <= 12 and 1 <= day <= 31
+
+
+def _redact_digit_run(match: re.Match[str]) -> str:
+    if _is_id_date_stamp(match.string, match.start(), match.end()):
+        return match.group(0)
+    return _REDACTED
+
+
+def _identifier_like(text: str) -> bool:
+    """True if `text` holds anything sanitize would redact (SSN, phone, digit run, email)."""
+    if _SSN.search(text) or _PHONE.search(text) or _EMAIL.search(text):
+        return True
+    return any(not _is_id_date_stamp(text, m.start(), m.end()) for m in _DIGIT_RUN.finditer(text))
+
+
+def _valid_for_some_type(target: str, prefixes: Mapping[str, str] | None) -> bool:
+    return any(is_valid_id(target, note_type, prefixes) for note_type in NOTE_TYPES)
+
+
+def display_id(
+    target: str,
+    known: Container[str] | None = None,
+    prefixes: Mapping[str, str] | None = None,
+) -> str:
     """A link target or ID-bearing field value, safe to print.
 
-    Note IDs identify notes and may be echoed. Anything else may be free text (a
-    frontmatter value, a name, an identifier) and is shown as a fixed placeholder.
+    An existing note's ID is echoed. Any other value may be free text (a frontmatter
+    value, a name, an identifier), so it is echoed only when it is a valid ID for one
+    of the configured note types (`prefixes` overrides the default ID prefixes) and
+    holds nothing identifier-like; otherwise it becomes a fixed placeholder.
     """
-    if (known is not None and target in known) or _ID_SHAPED.match(target):
+    if known is not None and target in known:
+        return target
+    if _valid_for_some_type(target, prefixes) and not _identifier_like(target):
         return target
     return NOT_AN_ID
+
+
+def display_path(target: str) -> str:
+    """A body link's file target, echoed only when path-shaped and nothing identifier-like."""
+    if _ID_SHAPED.match(target) and not _identifier_like(target):
+        return target
+    return NOT_A_PATH
+
+
+def strip_controls(text: str) -> str:
+    """`text` with control and bidi-override characters replaced by spaces."""
+    return _CONTROL.sub(" ", text)
 
 
 def sanitize(message: str) -> str:
@@ -52,8 +115,10 @@ def sanitize(message: str) -> str:
         while end and not text[end - 1].isspace():
             end -= 1
         text = text[:end]
-    text = _EMAIL.sub("[redacted]", text)
-    text = _DIGIT_RUN.sub("[redacted]", text)
+    text = _EMAIL.sub(_REDACTED, text)
+    text = _SSN.sub(_REDACTED, text)
+    text = _PHONE.sub(_REDACTED, text)
+    text = _DIGIT_RUN.sub(_redact_digit_run, text)
     text = " ".join(text.split())
     if len(text) > _MAX_MESSAGE:
         text = text[: _MAX_MESSAGE - 1] + "…"
@@ -106,12 +171,12 @@ def exit_code(findings: Iterable[Finding]) -> int:
 def _render_text(findings: list[Finding]) -> str:
     lines = []
     for f in findings:
-        loc = f.path or "<vault>"
+        loc = strip_controls(f.path) or "<vault>"
         if f.line:
             loc += f":{f.line}"
         if f.col:
             loc += f":{f.col}"
-        lines.append(f"{loc}: {f.severity} [{f.rule}] {f.message}")
+        lines.append(f"{loc}: {f.severity} [{strip_controls(f.rule)}] {f.message}")
     s = summarize(findings)
     lines.append(f"{s['errors']} error(s), {s['warnings']} warning(s), {s['info']} info")
     return "\n".join(lines)
@@ -124,7 +189,7 @@ def _render_json(findings: list[Finding]) -> str:
 
 
 def _gh_escape(value: str) -> str:
-    return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    return strip_controls(value).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
 
 def _gh_property(value: str) -> str:

@@ -41,8 +41,10 @@ def list_notes(
 def links(vault: Vault, note_id: str) -> dict[str, Any]:
     if note_id not in vault.notes:
         raise KeyError(note_id)
+    prefixes = vault.config.id_prefixes
+    inbound, outbound = vault.inbound.get(note_id, ()), vault.outbound.get(note_id, ())
     return {
         "id": note_id,
-        "in": sorted({display_id(t, vault.notes) for t in vault.inbound.get(note_id, ())}),
-        "out": sorted({display_id(t, vault.notes) for t in vault.outbound.get(note_id, ())}),
+        "in": sorted({display_id(t, vault.notes, prefixes) for t in inbound}),
+        "out": sorted({display_id(t, vault.notes, prefixes) for t in outbound}),
     }

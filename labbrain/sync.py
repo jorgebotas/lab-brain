@@ -65,7 +65,7 @@ def plan(vault: Vault) -> tuple[list[Change], list[Conflict]]:
         current = old.get_str("superseded_by")
         if current and current != new:
             message = (
-                f"{old_id} is already superseded by {display_id(current, vault.notes)}; "
+                f"{old_id} is already superseded by {display_id(current, vault.notes, vault.config.id_prefixes)}; "
                 f"{new} also claims to supersede it"
             )
             conflicts.append(Conflict(old_id, old.rel, message))

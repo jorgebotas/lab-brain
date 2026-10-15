@@ -33,7 +33,10 @@ lab-brain/
                             # script: labbrain = labbrain.cli:main
   labbrain/
     __init__.py             # __version__
+    __main__.py             # python -m labbrain
     cli.py                  # argparse; parses, calls library, formats text/JSON. No logic.
+    layout.py               # folder names, note types, skip lists (constants only)
+    validate.py             # single-file validation used by `validate` and the M5 hook
     vault.py                # root discovery, Config model, Vault graph, atomic writes
     notes.py                # Note: path + frontmatter + body; split/join; wikilink extraction
     schema.py               # pydantic BaseNote + 9 subclasses, discriminated union on `type`
@@ -68,7 +71,7 @@ lab-brain/
   README.md                 # minimal until sub-project 5
 ```
 
-Deviations from the parent tree (each gets an ADR): `lint.py` → `lint/` package; added `findings.py`, `scaffold.py`, `sync.py`, `query.py`, `confighash.py`, `gitutil.py`, `.pre-commit-hooks.yaml`.
+Deviations from the parent tree (each gets an ADR): `lint.py` → `lint/` package; added `layout.py`, `validate.py`, `findings.py`, `scaffold.py`, `sync.py`, `query.py`, `confighash.py`, `gitutil.py`, `.pre-commit-hooks.yaml`.
 
 ### Module boundaries
 
@@ -81,7 +84,7 @@ Deviations from the parent tree (each gets an ADR): `lint.py` → `lint/` packag
 
 ### Discovery
 
-`LABBRAIN_VAULT` if set; otherwise the nearest ancestor of cwd containing `.labbrain/config.yaml`. Neither → exit 2 with a message naming both mechanisms.
+`--vault PATH` if given; else `LABBRAIN_VAULT` if set; otherwise the nearest ancestor of cwd containing `.labbrain/config.yaml`. Neither → exit 2 with a message naming both mechanisms.
 
 ### Config (`.labbrain/config.yaml`)
 
@@ -135,7 +138,8 @@ Links are harvested from body wikilinks (`[[ID]]`, `[[ID|text]]`, `[[ID\|text]]`
 
 ### Reading and writing
 
-- Frontmatter is parsed with ruamel.yaml round-trip mode; pydantic validates a plain-dict copy; edits mutate the ruamel `CommentedMap` so key order, comments and quoting survive. The body is passed through byte-for-byte.
+- **Reads** use ruamel's `safe` loader (C-accelerated via `ruamel.yaml.clib`); round-trip loading costs ~3 ms per file and would break the 3 s lint budget at 3,000 notes. pydantic validates the resulting plain dict.
+- **Writes** re-load the file in ruamel round-trip mode, mutate the `CommentedMap`, and dump with `indent(mapping=2, sequence=4, offset=2)` (Obsidian's property style), so key order, comments and quoting survive. `None` dumps as an empty value (`key:`), matching Obsidian. The body is passed through byte-for-byte.
 - Writes go to a temp file in the same directory, then `os.replace`. No locking (one writer per working tree assumed).
 - Tool edits set `updated` to today.
 
@@ -193,6 +197,7 @@ Field types worth pinning: `created`/`updated`/`extracted`/`as_of` are dates; cl
 ## 6. CLI
 
 ```
+labbrain [--vault PATH] <command> ...      # global; overrides LABBRAIN_VAULT and discovery
 labbrain vault root
 labbrain config [--key dotted.key]
 labbrain new-id <type> --title T [--author A] [--at DATETIME]
@@ -214,7 +219,7 @@ labbrain --version
 
 **Exit codes:** 0 = no error-severity findings (warnings allowed); 1 = at least one error; 2 = usage or configuration problem.
 
-**JSON shape** (validate, sync, lint, phi-scan): `{"findings": [{"rule", "severity", "path", "line", "message"}], "summary": {"errors": n, "warnings": n, "info": n}}`.
+**JSON shape** (validate, sync, lint, phi-scan): `{"findings": [{"rule", "severity", "path", "line", "col", "message"}], "summary": {"errors": n, "warnings": n, "info": n}}`.
 
 **`validate <path>`** is single-file and must not load the whole vault. Checks: parse, schema model, ID format, `id` = filename, author membership, duplicate filename (glob), `missing-section`, and phi when `protected_data`. Budget: < 300 ms. Because the M5 hook will call it on every write in the vault:
 - A path inside the vault that is not a note (a `README.md`, a log file, a manuscript) gets only the phi check (when protected), never a schema error.
@@ -308,9 +313,9 @@ Applies to agent-authored **concept** and **claim** notes only (experiments are 
 | `phi-name` | Case-insensitive whole-word matches from the gitignored denylist file, if present |
 | `phi-small-cell` | Table cells in a column headed n / N / count / patients / subjects with integer 1…`min_cell_size − 1`; inline `n = 5`, `N=5`, `5 patients` / `5 subjects` in that range. `<11`-style suppressed values pass. |
 
-**Small-cell exemption for ML units.** ML notes say "n = 3 seeds" or "N=5 folds" constantly. An inline `n = k` immediately followed by a non-person unit (seeds, runs, folds, splits, epochs, layers, heads, models, trials, replicates, GPUs, nodes, samples-per-batch) is not flagged. A bare `n = 5`, or one followed by a person word, is flagged; that errs toward false positives, as the parent spec requires. Table columns headed `n` are always checked; a column of seed counts belongs under a header like `seeds`.
+**Small-cell exemption for ML units.** ML notes say "n = 3 seeds" or "N=5 folds" constantly. An inline `n = k` immediately followed by a non-person unit (seeds, runs, folds, splits, epochs, layers, heads, models, trials, replicates, GPUs, nodes, steps, batches, tokens, classes, tasks, checkpoints, iterations, configs, sweeps). "samples" is deliberately **not** exempt: in clinical work it often means patients' samples is not flagged. A bare `n = 5`, or one followed by a person word, is flagged; that errs toward false positives, as the parent spec requires. Table columns headed `n` are always checked; a column of seed counts belongs under a header like `seeds`.
 
-Scope: every text file in the vault except `scratch/`, `.git/`, `.labbrain/` (config and allowlist hashes are not prose), `index.md` and binary files (null byte in the first 8 KB, or `raw/**/*.pdf`). Manuscripts **are** scanned.
+Scope: every text file in the vault except `scratch/`, any dot-directory (`.git/`, `.labbrain/`, `.obsidian/`, `.claude/`: config, hashes and tool state, not prose), `__pycache__/`, `index.md` and binary files (null byte in the first 8 KB, or `raw/**/*.pdf`). Manuscripts **are** scanned.
 
 ### Output never contains matched text
 
@@ -380,6 +385,8 @@ pytest-cov with `fail_under = 85` over `schema`, `ids`, `lint`, `phi`, `vault`. 
 
 ## 10. ADRs to record in `docs/decisions/`
 
+Recorded as eight grouped ADRs (layout; lint rule set; frozen-edit; PHI; CLI and dependencies; sync and new; schema details; fixtures), each listing which items below it covers.
+
 1. `lint/` package and `findings.py` (deviation from parent tree)
 2. `missing-section` warning rule (addition to parent rule table)
 3. `cross-protocol` structured-only, claims only
@@ -418,3 +425,11 @@ pytest-cov with `fail_under = 85` over `schema`, `ids`, `lint`, `phi`, `vault`. 
   - Added conditional schema requirements (`superseded_by`, `consolidated_into`) and pinned field types.
   - Added the `sync-pending` rule.
   - Added `list`, `links`, `config-hash`, `schema`, `--format github`, `--version`, `.pre-commit-hooks.yaml` and `LABBRAIN_NOW`.
+- 2026-10-15: Planning amendments.
+  - Reads use the C-backed safe loader; round-trip only on write.
+  - Global `--vault` option for subfolder vaults under pre-commit.
+  - JSON findings include `col`.
+  - "samples" removed from the small-cell exemption list.
+  - phi-scan skips all dot-directories.
+  - Added `layout.py`, `validate.py` and `__main__.py`.
+  - ADRs grouped into eight files.

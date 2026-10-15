@@ -274,3 +274,25 @@ def undated_fact(vault: Path) -> None:
         "which tends to improve calibration.\n",
         "which tends to improve calibration.\n\nIn our runs calibration error dropped to 0.04.\n",
     )
+
+
+# --- sync-pending ------------------------------------------------------------------
+
+
+@mutation("sync-pending")
+def sync_pending_supersession(vault: Path) -> None:
+    """label-smoothing now supersedes the baseline but sync has not run: the baseline is
+    still `done`, so claim-stale stays quiet, and the two config hashes differ."""
+    replace(
+        vault,
+        SMOOTHING,
+        "links: [EXP-20260901-baseline]",
+        "links: [EXP-20260901-baseline]\nsupersedes: EXP-20260901-baseline",
+    )
+
+
+@mutation("sync-pending")
+def sync_pending_protocol(vault: Path) -> None:
+    """EVAL-v2 is `draft` although done experiments reference it (committed, so no
+    frozen-edit)."""
+    replace(vault, EVAL_V2, "status: frozen", "status: draft")

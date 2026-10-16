@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from helpers import MIN_CONFIG, body_for, make_vault, note_text, write
 
+from labbrain.findings import sanitize
 from labbrain.vault import (
     ConfigError,
     Vault,
@@ -194,3 +195,9 @@ def test_unreadable_note_does_not_abort_load(tmp_path: Path) -> None:
     assert sorted(vault.notes) == ["EXP-20261001-a", "locked"]
     assert vault.notes["locked"].errors == ["cannot read file"]
     assert vault.notes["EXP-20261001-a"].data is not None
+
+
+def test_loading_a_config_registers_its_id_prefixes(tmp_path: Path) -> None:
+    root = make_vault(tmp_path, MIN_CONFIG + "id_prefixes: {experiment: RUN}\n")
+    load_config(root)
+    assert sanitize("RUN-20261001-a") == "RUN-20261001-a"

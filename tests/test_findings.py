@@ -9,10 +9,12 @@ import pytest
 from labbrain.findings import (
     ERROR,
     INFO,
+    NOT_A_PATH,
     NOT_AN_ID,
     WARNING,
     Finding,
     display_id,
+    display_path,
     exit_code,
     render,
     sanitize,
@@ -203,3 +205,37 @@ def test_display_id_hides_letter_adjacent_digit_runs() -> None:
     for value in (f"mrn{rng.randrange(10**7, 10**8)}", f"case-x{rng.randrange(10**6, 10**7)}"):
         assert display_id(value) == NOT_AN_ID
     assert display_id("resnet152-gpt4") == "resnet152-gpt4"
+
+
+def _birth_date(seed: int) -> str:
+    """A synthetic YYYYMMDD that reads as a 20th-century calendar date."""
+    rng = random.Random(seed)
+    return f"19{rng.randrange(40, 99)}{rng.randrange(1, 12):02d}{rng.randrange(1, 28):02d}"
+
+
+def test_sanitize_redacts_date_shaped_runs_outside_the_id_stamp() -> None:
+    """Only the stamp right after an ID prefix is kept: a date glued to a name, or one
+    later in an ID's slug, can be a date of birth."""
+    born = _birth_date(46)
+    for text in (
+        f"patient-{born}",
+        f"{born}-visit",
+        f"jane-doe-{born}-x",
+        f"EXP-20261001-born-{born}",
+        f"EXP-{born}",
+        f"exp-{born}-a",
+    ):
+        assert born not in sanitize(f"see {text} now"), text
+
+
+def test_sanitize_keeps_stamps_in_id_position() -> None:
+    text = "[[RUN-20261001-a]] in experiments/EXP-20261001-a.md (EXP-20261001-a)"
+    assert sanitize(text) == text
+
+
+def test_display_hides_date_shaped_slugs() -> None:
+    born = _birth_date(47)
+    assert display_id(f"jane-{born}-x") == NOT_AN_ID  # a syntactically valid concept slug
+    assert display_id(f"EXP-20261001-born-{born}") == NOT_AN_ID
+    assert display_path(f"people/jane-{born}.md") == NOT_A_PATH
+    assert display_path("experiments/EXP-20261001-a.md") == "experiments/EXP-20261001-a.md"

@@ -28,7 +28,8 @@ _GITHUB_LEVEL = {ERROR: "error", WARNING: "warning", INFO: "notice"}
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]+")
 # Runs of six or more digits not inside a word. A run touching a hyphen or underscore
 # is redacted too (a prefixed record number, say), unless it is exactly an ID's date
-# stamp (eight digits reading as a 19xx/20xx calendar date, next to a hyphen).
+# stamp: eight digits reading as a 19xx/20xx calendar date, in the position the ID
+# formats put it (see _is_id_date_stamp).
 _DIGIT_RUN = re.compile(r"(?<![^\W_])\d{6,}(?![^\W_])")
 _ANY_DIGIT_RUN = re.compile(r"(?<!\d)\d{6,}(?!\d)")
 _SSN = re.compile(r"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)")
@@ -46,11 +47,21 @@ NOT_AN_ID = "<not a valid note ID>"
 NOT_A_PATH = "<not a valid file path>"
 
 
+# An ID prefix ending at a token boundary: `EXP-` in `[[EXP-`, `/EXP-` or ` EXP-`.
+_STAMP_PREFIX = re.compile(r"(?<![\w-])[A-Z][A-Z0-9]*-\Z")
+
+
 def _is_id_date_stamp(text: str, start: int, end: int) -> bool:
-    """True for an eight-digit run reading as YYYYMMDD (19xx/20xx) next to a hyphen."""
-    if end - start != 8:
+    """True for an eight-digit run reading as YYYYMMDD (19xx/20xx) where an ID keeps its
+    date: right after an upper-case prefix that starts a token, and followed by `-`.
+
+    Anywhere else (glued to a lower-case name, later in a slug, or ending a token) the
+    date may be a date of birth, so it is not exempt. A lower-case configured prefix
+    is treated the same way: its IDs are redacted, never their neighbours echoed.
+    """
+    if end - start != 8 or end >= len(text) or text[end] != "-":
         return False
-    if not ((start and text[start - 1] == "-") or (end < len(text) and text[end] == "-")):
+    if not _STAMP_PREFIX.search(text, max(0, start - 17), start):
         return False
     year, month, day = (
         int(text[start : start + 4]),

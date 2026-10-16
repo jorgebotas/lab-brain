@@ -541,3 +541,29 @@ def test_only_the_vault_root_index_is_skipped(tmp_path: Path) -> None:
         assert [(f.path, f.rule) for f in findings] == [("manuscripts/index.md", "phi-phone")]
     alone = scan([root / "manuscripts"], root=None, settings=ScanSettings(), allow=frozenset())
     assert [f.rule for f in alone] == ["phi-phone"]
+
+
+def test_lint_and_phi_scan_agree_on_bom_notes(tmp_path: Path) -> None:
+    """lint reuses the loaded note text; phi-scan reads the file. With a BOM the two
+    must report the same column and hash line 1 the same way."""
+    root = make_vault(tmp_path)
+    line = f"Front desk {phone()} (synthetic)."
+    (root / "concepts").mkdir()
+    (root / "concepts" / "a.md").write_bytes(f"\ufeff{line}\n".encode())
+
+    def lint_spans() -> list[tuple[int, int]]:
+        return [(f.line, f.col) for f in lint.run(Vault.load(root), today=TODAY, only=["phi"])]
+
+    def scan_spans() -> list[tuple[int, int]]:
+        allow = load_allowlist(root)
+        hits = scan([root], root=root, settings=ScanSettings(), allow=allow)
+        return [(f.line, f.col) for f in hits]
+
+    assert lint_spans() == scan_spans() != []
+    write(
+        root,
+        ".labbrain/phi-allow.yaml",
+        f"- {{file: concepts/a.md, rule: phi-phone, line_sha256: '{line_hash(line)}', "
+        "line_hint: 1, author: alice, date: 2026-10-15, reason: synthetic}\n",
+    )
+    assert lint_spans() == scan_spans() == []

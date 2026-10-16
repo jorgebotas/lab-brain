@@ -20,7 +20,7 @@ from labbrain import gitutil
 from labbrain.findings import ERROR, INFO, Finding
 from labbrain.layout import RAW_DIR, is_note_rel
 from labbrain.lint import LintContext, rule
-from labbrain.notes import Note, parse_note_text
+from labbrain.notes import Note, decode_note, parse_note_text
 from labbrain.schema import MODELS
 
 RULE = "frozen-edit"
@@ -90,7 +90,7 @@ def _raw_bytes_differ(path: Path, tree: dict[str, str], blobs: dict[str, bytes],
 
 
 def _parse_blob(data: bytes, rel: str) -> Note:
-    return parse_note_text(data.decode("utf-8", "replace"), Path(rel), rel)
+    return parse_note_text(decode_note(data), Path(rel), rel)
 
 
 class _DoneProtocolsAtBase:

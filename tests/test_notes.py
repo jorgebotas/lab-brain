@@ -322,3 +322,24 @@ def test_update_frontmatter_never_warns_with_source_snippets(
     assert [str(w.message) for w in caught] == []
     out, err = capsys.readouterr()
     assert value not in out + err
+
+
+BOM = "\ufeff"
+
+
+def test_bom_is_dropped_before_parsing(tmp_path: Path) -> None:
+    path = tmp_path / "note.md"
+    path.write_bytes((BOM + SAMPLE).encode())
+    note = parse_note(path, tmp_path)
+    assert note.errors == []
+    assert not note.text.startswith(BOM)
+    assert note.data is not None and note.data["status"] == "running"
+
+
+def test_update_frontmatter_keeps_a_bom(tmp_path: Path) -> None:
+    path = tmp_path / "note.md"
+    path.write_bytes((BOM + SAMPLE).encode())
+    assert update_frontmatter(path, {"status": "done"}) is True
+    new = path.read_bytes().decode()
+    assert new.startswith(BOM + "---")
+    assert _changed_lines(SAMPLE, new[1:]) == ["- status: running", "+ status: done"]

@@ -257,22 +257,25 @@ def decode_note(data: bytes) -> str:
     """Note bytes as text: utf-8 with errors="replace", minus a leading byte-order mark.
 
     Every reader of note text goes through here, so a BOM never hides the frontmatter
-    and line 1 has the same columns everywhere (phi-scan drops the BOM too).
+    and line 1 has the same columns everywhere (phi-scan drops the BOM too). Line
+    endings become LF, as read_text does, so files and git blobs parse the same way.
     """
-    return data.decode("utf-8", errors="replace").removeprefix(BOM)
+    text = data.decode("utf-8", errors="replace").removeprefix(BOM)
+    if "\r" in text:
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return text
 
 
 def read_note_text(path: Path) -> str | None:
     """The file through decode_note, or None if it cannot be read.
 
-    Safe to call from worker threads: it only reads. Line endings are translated, as
-    by read_text.
+    Safe to call from worker threads: it only reads.
     """
     try:
         data = path.read_bytes()
     except OSError:
         return None
-    return decode_note(data).replace("\r\n", "\n").replace("\r", "\n")
+    return decode_note(data)
 
 
 def parse_read_note(path: Path, root: Path, text: str | None) -> Note:

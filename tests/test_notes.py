@@ -12,6 +12,7 @@ import pytest
 
 from labbrain.notes import (
     atomic_write,
+    decode_note,
     future_agents_block,
     future_agents_end,
     h2_headings,
@@ -343,3 +344,8 @@ def test_update_frontmatter_keeps_a_bom(tmp_path: Path) -> None:
     new = path.read_bytes().decode()
     assert new.startswith(BOM + "---")
     assert _changed_lines(SAMPLE, new[1:]) == ["- status: running", "+ status: done"]
+
+
+def test_decode_note_translates_newlines() -> None:
+    """Files and git blobs decode the same way, so a CR-only note still parses at base."""
+    assert decode_note(b"\xef\xbb\xbf---\rid: x\r\n---\r") == "---\nid: x\n---\n"

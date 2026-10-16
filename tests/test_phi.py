@@ -567,3 +567,10 @@ def test_lint_and_phi_scan_agree_on_bom_notes(tmp_path: Path) -> None:
         "line_hint: 1, author: alice, date: 2026-10-15, reason: synthetic}\n",
     )
     assert lint_spans() == scan_spans() == []
+
+
+def test_denylist_with_a_bom_keeps_its_first_name(tmp_path: Path) -> None:
+    root = make_vault(tmp_path)
+    (root / ".labbrain" / "phi-denylist.txt").write_bytes("\ufeffZebulon Quixley\n".encode())
+    settings = ScanSettings.from_config(load_config(root), root)
+    assert [h.rule for h in scan_text("Seen by Zebulon Quixley.\n", settings)] == ["phi-name"]

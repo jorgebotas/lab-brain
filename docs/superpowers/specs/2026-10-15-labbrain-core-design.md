@@ -336,7 +336,7 @@ Validation errors are a second leak path, because the PostToolUse validator feed
 - pydantic errors are rendered from `errors(include_input=False, include_url=False)` as `loc: msg`.
 - ruamel parse errors are reduced to `frontmatter is not valid YAML (line N)`.
 - Custom validators never interpolate field values into messages.
-- `findings.sanitize()` is applied to every message before output. It strips C0/C1 controls and bidi overrides, and redacts emails, SSN and phone shapes, and runs of six or more digits even next to a hyphen or underscore (only an ID's YYYYMMDD date stamp is kept, and only in ID position: after an upper-case prefix that starts a token, followed by a hyphen). *(Amended 2026-10-16.)*
+- `findings.sanitize()` is applied to every message before output. It strips C0/C1 controls and bidi overrides, and redacts emails, SSN and phone shapes, and runs of six or more digits even next to a hyphen or underscore (only an ID's YYYYMMDD date stamp is kept, and only in ID position: after a configured dated-ID prefix that starts a token, followed by a hyphen). *(Amended 2026-10-16.)*
 
 ## 9. Testing
 
@@ -441,4 +441,4 @@ Recorded as eight grouped ADRs (layout; lint rule set; frozen-edit; PHI; CLI and
   - Folder-qualified note links are paths (resolve only if the exact file exists); unresolved targets are echoed only as valid IDs for a configured type with nothing identifier-like.
 - 2026-10-16: Follow-up amendments.
   - The date-stamp exemption is position-bound, so DOB-shaped slugs (`name-YYYYMMDD`) are redacted and not echoed.
-  - A leading UTF-8 BOM is dropped by every note reader (load, frozen-edit's git blobs) and kept by frontmatter writes; lint and phi-scan agree on line-1 columns and allowlist hashes.
+  - A leading UTF-8 BOM is dropped (and line endings normalised) by every note reader, including frozen-edit's git blobs, and kept by frontmatter writes; lint and phi-scan agree on line-1 columns and allowlist hashes. The PHI denylist tolerates a BOM.

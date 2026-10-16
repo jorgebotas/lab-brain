@@ -1,0 +1,13 @@
+- id: labbrain-lint
+  name: labbrain lint
+  description: Lint a lab-brain vault (schema, links, frozen notes, PHI).
+  entry: labbrain lint
+  language: python
+  pass_filenames: false
+  always_run: true
+- id: labbrain-phi-scan
+  name: labbrain phi-scan
+  description: Scan staged text files for PHI patterns.
+  entry: labbrain phi-scan
+  language: python
+  types: [text]

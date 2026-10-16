@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from helpers import PINNED_NOW, commit_all, copy_fixture, git
+
+from labbrain.findings import set_id_prefixes
 
 INHERITED_GIT_VARS = (
     "GIT_DIR",
@@ -26,6 +29,14 @@ def isolated_git(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+
+@pytest.fixture(autouse=True)
+def default_id_prefixes() -> Iterator[None]:
+    """Each test starts and ends with the default ID prefixes registered for redaction."""
+    set_id_prefixes(None)
+    yield
+    set_id_prefixes(None)
 
 
 @pytest.fixture

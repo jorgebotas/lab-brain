@@ -13,7 +13,7 @@ import re
 from collections.abc import Container, Iterable, Mapping
 from dataclasses import dataclass
 
-from labbrain.ids import is_valid_id
+from labbrain.ids import DATED_TYPES, DEFAULT_PREFIXES, is_valid_id
 from labbrain.layout import NOTE_TYPES
 
 ERROR = "error"
@@ -28,7 +28,8 @@ _GITHUB_LEVEL = {ERROR: "error", WARNING: "warning", INFO: "notice"}
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]+")
 # Runs of six or more digits not inside a word. A run touching a hyphen or underscore
 # is redacted too (a prefixed record number, say), unless it is exactly an ID's date
-# stamp (eight digits reading as a 19xx/20xx calendar date, next to a hyphen).
+# stamp: eight digits reading as a 19xx/20xx calendar date, in the position the ID
+# formats put it (see _is_id_date_stamp).
 _DIGIT_RUN = re.compile(r"(?<![^\W_])\d{6,}(?![^\W_])")
 _ANY_DIGIT_RUN = re.compile(r"(?<!\d)\d{6,}(?!\d)")
 _SSN = re.compile(r"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)")
@@ -46,11 +47,39 @@ NOT_AN_ID = "<not a valid note ID>"
 NOT_A_PATH = "<not a valid file path>"
 
 
-def _is_id_date_stamp(text: str, start: int, end: int) -> bool:
-    """True for an eight-digit run reading as YYYYMMDD (19xx/20xx) next to a hyphen."""
-    if end - start != 8:
+def _stamp_prefixes(prefixes: Mapping[str, str] | None) -> tuple[str, ...]:
+    merged = {**DEFAULT_PREFIXES, **(prefixes or {})}
+    return tuple(sorted({merged[t] for t in (*DATED_TYPES, "handoff") if merged[t]}))
+
+
+# The prefixes of ID formats that carry a date stamp (dated types and handoffs). The
+# vault's configured prefixes replace the defaults when its config loads.
+_DATED_PREFIXES = _stamp_prefixes(None)
+
+
+def set_id_prefixes(prefixes: Mapping[str, str] | None) -> None:
+    """Spare date stamps after these ID prefixes (merged over the defaults, as in config).
+
+    Called by load_config; None restores the defaults."""
+    global _DATED_PREFIXES
+    _DATED_PREFIXES = _stamp_prefixes(prefixes)
+
+
+def _is_id_date_stamp(
+    text: str, start: int, end: int, dated: tuple[str, ...] | None = None
+) -> bool:
+    """True for an eight-digit run reading as YYYYMMDD (19xx/20xx) where an ID keeps its
+    date: right after a dated ID prefix that starts a token (`EXP-` in `[[EXP-`,
+    `/EXP-` or ` EXP-`), and followed by `-`.
+
+    Anywhere else (after another word such as MRN- or an initial, later in a slug, or
+    ending a token) the date may be a date of birth, so it is not exempt. `dated`
+    overrides the registered prefixes.
+    """
+    if end - start != 8 or end >= len(text) or text[end] != "-":
         return False
-    if not ((start and text[start - 1] == "-") or (end < len(text) and text[end] == "-")):
+    prefixes = _DATED_PREFIXES if dated is None else dated
+    if not any(_follows_prefix(text, start, p) for p in prefixes):
         return False
     year, month, day = (
         int(text[start : start + 4]),
@@ -60,20 +89,28 @@ def _is_id_date_stamp(text: str, start: int, end: int) -> bool:
     return 1900 <= year <= 2099 and 1 <= month <= 12 and 1 <= day <= 31
 
 
+def _follows_prefix(text: str, start: int, prefix: str) -> bool:
+    """True if `prefix-` ends at `start` and starts a token (no word char or `-` before)."""
+    begin = start - len(prefix) - 1
+    if begin < 0 or text[begin:start] != f"{prefix}-":
+        return False
+    return begin == 0 or not (text[begin - 1].isalnum() or text[begin - 1] in "_-")
+
+
 def _redact_digit_run(match: re.Match[str]) -> str:
     if _is_id_date_stamp(match.string, match.start(), match.end()):
         return match.group(0)
     return _REDACTED
 
 
-def _identifier_like(text: str) -> bool:
+def _identifier_like(text: str, dated: tuple[str, ...] | None = None) -> bool:
     """True if `text` holds an SSN or phone shape, an email, or a run of six or more
     digits other than an ID's date stamp. Stricter than sanitize, which spares digit
     runs glued to letters: a value is echoed only when it holds no long run at all."""
     if _SSN.search(text) or _PHONE.search(text) or _EMAIL.search(text):
         return True
     runs = _ANY_DIGIT_RUN.finditer(text)
-    return any(not _is_id_date_stamp(text, m.start(), m.end()) for m in runs)
+    return any(not _is_id_date_stamp(text, m.start(), m.end(), dated) for m in runs)
 
 
 def _valid_for_some_type(target: str, prefixes: Mapping[str, str] | None) -> bool:
@@ -94,7 +131,8 @@ def display_id(
     """
     if known is not None and target in known:
         return target
-    if _valid_for_some_type(target, prefixes) and not _identifier_like(target):
+    dated = None if prefixes is None else _stamp_prefixes(prefixes)
+    if _valid_for_some_type(target, prefixes) and not _identifier_like(target, dated):
         return target
     return NOT_AN_ID
 

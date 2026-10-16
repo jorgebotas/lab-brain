@@ -250,15 +250,32 @@ def parse_note(path: Path, root: Path) -> Note:
     return parse_read_note(path, root, read_note_text(path))
 
 
+BOM = "\ufeff"
+
+
+def decode_note(data: bytes) -> str:
+    """Note bytes as text: utf-8 with errors="replace", minus a leading byte-order mark.
+
+    Every reader of note text goes through here, so a BOM never hides the frontmatter
+    and line 1 has the same columns everywhere (phi-scan drops the BOM too). Line
+    endings become LF, as read_text does, so files and git blobs parse the same way.
+    """
+    text = data.decode("utf-8", errors="replace").removeprefix(BOM)
+    if "\r" in text:
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return text
+
+
 def read_note_text(path: Path) -> str | None:
-    """The file decoded as utf-8 with errors="replace", or None if it cannot be read.
+    """The file through decode_note, or None if it cannot be read.
 
     Safe to call from worker threads: it only reads.
     """
     try:
-        return path.read_text(encoding="utf-8", errors="replace")
+        data = path.read_bytes()
     except OSError:
         return None
+    return decode_note(data)
 
 
 def parse_read_note(path: Path, root: Path, text: str | None) -> Note:
@@ -407,6 +424,8 @@ def update_frontmatter(path: Path, updates: Mapping[str, Any]) -> bool:
     """
     with open(path, encoding="utf-8", newline="") as handle:
         text = handle.read()
+    bom = BOM if text.startswith(BOM) else ""
+    text = text.removeprefix(BOM)
     match = _FM_RE.match(text)
     if match is None:
         raise ValueError(f"{path.name} has no frontmatter to update")
@@ -435,5 +454,5 @@ def update_frontmatter(path: Path, updates: Mapping[str, Any]) -> bool:
     dumped = buffer.getvalue()
     if crlf:
         dumped = dumped.replace("\n", "\r\n")
-    atomic_write(path, text[: match.start("fm")] + dumped + text[match.end("fm") :])
+    atomic_write(path, bom + text[: match.start("fm")] + dumped + text[match.end("fm") :])
     return True

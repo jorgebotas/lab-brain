@@ -99,14 +99,14 @@ def test_read_error_in_a_worker_becomes_a_schema_error(
     root = make_vault(tmp_path).resolve()
     write(root, "concepts/fine.md", note_text("fine", "concept", sources=["x"]))
     bad = write(root, "concepts/bad.md", note_text("bad", "concept", sources=["x"]))
-    real_read_text = Path.read_text
+    real_read_bytes = Path.read_bytes
 
-    def read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+    def read_bytes(self: Path, *args: Any, **kwargs: Any) -> bytes:
         if self == bad:
             raise PermissionError("denied")
-        return real_read_text(self, *args, **kwargs)
+        return real_read_bytes(self, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
     loaded = Vault.load(root)
     assert loaded.notes["bad"].errors == ["cannot read file"]
     assert loaded.notes["bad"].text == "" and loaded.notes["bad"].data is None

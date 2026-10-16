@@ -115,7 +115,7 @@ def load_denylist(root: Path | None, rel_path: str) -> re.Pattern[str] | None:
     if root is None or not (root / rel_path).is_file():
         return None
     try:
-        text = (root / rel_path).read_text(encoding="utf-8")
+        text = (root / rel_path).read_text(encoding="utf-8-sig")  # an editor may add a BOM
     except (OSError, UnicodeDecodeError):
         # `from None`: a UnicodeDecodeError carries the raw bytes, i.e. the names.
         raise ConfigError("phi denylist file cannot be read") from None

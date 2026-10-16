@@ -16,3 +16,13 @@ All notable changes to this project are documented here. Versions follow semanti
   UTF-16 and UTF-32 text files are decoded and scanned.
 - `.pre-commit-hooks.yaml` exposing `labbrain-lint` and `labbrain-phi-scan`.
 - Engine ADRs in `docs/decisions/`.
+
+### Fixed
+
+- Messages no longer echo a date-shaped run outside an ID's date stamp (`name-YYYYMMDD`,
+  `MRN-YYYYMMDD-…`), which could be a date of birth. Only the configured dated-ID prefixes
+  qualify.
+- A byte-order mark at the start of the PHI denylist no longer hides its first name.
+- Notes saved with a UTF-8 byte-order mark: their frontmatter is read (it was reported missing),
+  frozen-edit compares them against git (it skipped them), frontmatter updates keep the mark, and
+  lint and phi-scan agree on line-1 columns and allowlist hashes.

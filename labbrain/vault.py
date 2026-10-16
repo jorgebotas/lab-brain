@@ -15,6 +15,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from labbrain import __version__
+from labbrain.findings import set_id_prefixes
 from labbrain.ids import DEFAULT_PREFIXES
 from labbrain.layout import CONFIG_PATH, iter_note_files
 from labbrain.notes import Note, parse_read_note, read_note_text, safe_load
@@ -189,13 +190,15 @@ def load_config(root: Path) -> Config:
     if not isinstance(raw, dict):
         raise ConfigError(f"{CONFIG_PATH} must be a YAML mapping")
     try:
-        return Config.model_validate(raw)
+        config = Config.model_validate(raw)
     except ValidationError as exc:
         details = "; ".join(
             f"{_render_config_loc(e['loc'])}: {e['msg']}"
             for e in exc.errors(include_url=False, include_context=False, include_input=False)
         )
         raise ConfigError(f"{CONFIG_PATH}: {details}") from exc
+    set_id_prefixes(config.id_prefixes)
+    return config
 
 
 def _version_tuple(version: str) -> tuple[int, ...]:

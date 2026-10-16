@@ -223,3 +223,20 @@ def test_existing_raw_file_changes_are_errors(
     assert frozen(vault_dir) == [
         ("error", RAW_PAPER, f"raw/ files are immutable; this file was {verb}")
     ]
+
+
+def test_bom_notes_compare_cleanly_against_git(vault_dir: Path) -> None:
+    path = vault_dir / BASELINE
+    path.write_bytes(b"\xef\xbb\xbf" + path.read_bytes())
+    commit_all(vault_dir, "add a BOM")
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("\n## Postmortem\n\nNothing to add.\n")
+    assert frozen(vault_dir) == []
+
+
+def test_bom_does_not_hide_frozen_field_edits(vault_dir: Path) -> None:
+    path = vault_dir / BASELINE
+    path.write_bytes(b"\xef\xbb\xbf" + path.read_bytes())
+    commit_all(vault_dir, "add a BOM")
+    replace(vault_dir, BASELINE, "created: 2026-09-01", "created: 2026-09-02")
+    assert [m for _s, _p, m in frozen(vault_dir)] == ["frozen field 'created' changed"]

@@ -9,13 +9,16 @@ import pytest
 from labbrain.findings import (
     ERROR,
     INFO,
+    NOT_A_PATH,
     NOT_AN_ID,
     WARNING,
     Finding,
     display_id,
+    display_path,
     exit_code,
     render,
     sanitize,
+    set_id_prefixes,
     sort_findings,
     summarize,
 )
@@ -203,3 +206,62 @@ def test_display_id_hides_letter_adjacent_digit_runs() -> None:
     for value in (f"mrn{rng.randrange(10**7, 10**8)}", f"case-x{rng.randrange(10**6, 10**7)}"):
         assert display_id(value) == NOT_AN_ID
     assert display_id("resnet152-gpt4") == "resnet152-gpt4"
+
+
+def _birth_date(seed: int) -> str:
+    """A synthetic YYYYMMDD that reads as a 20th-century calendar date."""
+    rng = random.Random(seed)
+    return f"19{rng.randrange(40, 99)}{rng.randrange(1, 12):02d}{rng.randrange(1, 28):02d}"
+
+
+def test_sanitize_redacts_date_shaped_runs_outside_the_id_stamp() -> None:
+    """Only the stamp right after an ID prefix is kept: a date glued to a name, or one
+    later in an ID's slug, can be a date of birth."""
+    born = _birth_date(46)
+    for text in (
+        f"patient-{born}",
+        f"{born}-visit",
+        f"jane-doe-{born}-x",
+        f"EXP-20261001-born-{born}",
+        f"EXP-{born}",
+        f"exp-{born}-a",
+    ):
+        assert born not in sanitize(f"see {text} now"), text
+
+
+def test_sanitize_keeps_stamps_in_id_position() -> None:
+    text = "[[HO-20261014-1420-x]] in experiments/EXP-20261001-a.md (DS-20261001-a)"
+    assert sanitize(text) == text
+
+
+def test_stamp_is_exempt_only_after_a_dated_id_prefix() -> None:
+    """An upper-case token is not enough: MRN-, DOB- or an initial can front a birth date."""
+    born = _birth_date(48)
+    for text in (
+        f"MRN-{born}-x",
+        f"J-{born}-x",
+        f"DOB-{born}-x",
+        f"LIT-{born}-x",
+        f"a_EXP-{born}-x",
+    ):
+        assert born not in sanitize(f"see {text}"), text
+    assert display_path(f"people/J-{born}-smith.md") == NOT_A_PATH
+
+
+def test_configured_prefixes_keep_their_stamps() -> None:
+    set_id_prefixes({"experiment": "LAB-EXP", "claim": "Clm", "dataset": "A" * 20})
+    text = f"LAB-EXP-20261001-a, Clm-20261001-b and {'A' * 20}-20261001-c"
+    assert sanitize(text) == text
+    assert "20261001" not in sanitize("EXP-20261001-a")  # not an ID prefix in this vault
+    set_id_prefixes({"experiment": ""})  # an empty prefix must not spare every stamp
+    assert "19800412" not in sanitize("see -19800412-a")
+    set_id_prefixes(None)
+    assert sanitize("EXP-20261001-a") == "EXP-20261001-a"
+
+
+def test_display_hides_date_shaped_slugs() -> None:
+    born = _birth_date(47)
+    assert display_id(f"jane-{born}-x") == NOT_AN_ID  # a syntactically valid concept slug
+    assert display_id(f"EXP-20261001-born-{born}") == NOT_AN_ID
+    assert display_path(f"people/jane-{born}.md") == NOT_A_PATH
+    assert display_path("experiments/EXP-20261001-a.md") == "experiments/EXP-20261001-a.md"

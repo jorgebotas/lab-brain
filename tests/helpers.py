@@ -46,6 +46,14 @@ def note_text(note_id: str, note_type: str, body: str | None = None, **fields: A
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "valid"
+RUNS_FIXTURE = Path(__file__).parent / "fixtures" / "runs"
+
+
+def copy_runs(vault: Path) -> Path:
+    """Copy the synthetic tracker runs to `<vault>/runs`, the default local runs_dir."""
+    return Path(shutil.copytree(RUNS_FIXTURE, vault / "runs"))
+
+
 PINNED_NOW = "2026-10-15T12:00:00"
 TODAY = date(2026, 10, 15)
 

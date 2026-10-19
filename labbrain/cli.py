@@ -378,6 +378,15 @@ def cmd_brief(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_tracker_fetch(args: argparse.Namespace) -> int:
+    from labbrain.trackers import describe, get_adapter
+
+    root, config = _config(args)
+    records = get_adapter(config, root).fetch(args.runs)
+    print(json.dumps([describe(r, config) for r in records], indent=2, default=str))
+    return EXIT_OK
+
+
 # --- parser -----------------------------------------------------------------------
 
 
@@ -501,6 +510,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("brief", "print where the project stands")
     p.add_argument("--short", action="store_true", help="at most four lines (SessionStart hook)")
     p.set_defaults(func=cmd_brief)
+
+    tracker = add("tracker", "tracker commands")
+    tracker_sub = tracker.add_subparsers(dest="tracker_command", required=True)
+    p = tracker_sub.add_parser("fetch", help="print runs as JSON", parents=[common])
+    p.add_argument("runs", nargs="+", metavar="RUN")
+    p.set_defaults(func=cmd_tracker_fetch)
     return parser
 
 

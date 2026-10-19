@@ -29,13 +29,14 @@ def flatten(config: Mapping[str, Any], prefix: str = "") -> dict[str, Any]:
     return flat
 
 
+def is_ignored(key: str, patterns: Iterable[str]) -> bool:
+    """True when a flattened config key matches a hash_ignore pattern (case-sensitive)."""
+    return any(fnmatch.fnmatchcase(key, pattern) for pattern in patterns)
+
+
 def config_hash(config: Mapping[str, Any], ignore: Iterable[str]) -> str:
     patterns = list(ignore)
-    kept = {
-        key: value
-        for key, value in flatten(config).items()
-        if not any(fnmatch.fnmatchcase(key, pattern) for pattern in patterns)
-    }
+    kept = {key: value for key, value in flatten(config).items() if not is_ignored(key, patterns)}
     payload = json.dumps(kept, sort_keys=True, separators=(",", ":"), default=str)
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 

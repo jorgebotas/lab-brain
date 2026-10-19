@@ -8,7 +8,7 @@ allowed-tools:
 
 # Working in a lab-brain vault
 
-The engine command is `uvx --from "${CLAUDE_PLUGIN_ROOT}" labbrain`. Type it in full every time. Never store it in a shell variable or use command substitution. Pass any text that comes from the user inside single quotes, writing a `'` inside it as `'\''`.
+The engine command is `uvx --from "${CLAUDE_PLUGIN_ROOT}" labbrain`. Type it in full every time. Never store it in a shell variable or use command substitution. Pass any text that comes from the user inside single quotes, writing a `'` inside it as `'\''`, and attach it to its option with `=` (`--title='<title>'`) so a value starting with `-` is not read as a flag.
 
 ## Orient first
 
@@ -38,8 +38,8 @@ Never delete a note. A correction is a new note with `supersedes: <ID>`.
 
 - IDs come only from the engine (`new`, `new-id`, `exp record`) or from existing notes. Never make one up.
 - Never write outside the vault.
-- Create notes with `uvx --from "${CLAUDE_PLUGIN_ROOT}" labbrain new <type> --title '<title>' --author claude --summary '<one line>'`. It prints the note's absolute path.
-- After editing a note, run `uvx --from "${CLAUDE_PLUGIN_ROOT}" labbrain finish <absolute path> --log '<what you did>' --author claude`. On exit 1, fix the reported fields and run it again.
+- Create notes with `uvx --from "${CLAUDE_PLUGIN_ROOT}" labbrain new <type> --title='<title>' --author claude --summary='<one line>'`. It prints the note's absolute path.
+- After editing a note, run `uvx --from "${CLAUDE_PLUGIN_ROOT}" labbrain finish <absolute path> --log='<what you did>' --author claude`. On exit 1, fix the reported fields and run it again.
 - Every number copied into a note carries its source: a run ID, an `[[EXP-...]]` link, or `as of YYYY-MM-DD`.
 - When the engine exits with an error, show its message to the user and stop. Never write the note by hand instead.
 
@@ -48,6 +48,8 @@ Never delete a note. A correction is a new note with `supersedes: <ID>`.
 - Never read, open, sample or print files under `data_paths`, even if asked. Ask the user to run the command and paste aggregate output.
 - The vault holds aggregates only. Counts below `min_cell_size` are written as `<min_cell_size`.
 - Never paste text that `phi-scan` matched into a note or a message.
+- Never put identifiers or individual-level details in a title, summary, body or hypothesis.
+- If `new` or `exp record` exits 2 with `matches a protected-data pattern`, it wrote nothing. Do not retry with the same text: tell the user which field to rephrase, never quoting the matched text, and stop.
 - Example records in notes are synthetic and labelled as synthetic.
 
 ## Skills

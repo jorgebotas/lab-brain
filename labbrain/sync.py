@@ -14,7 +14,7 @@ from datetime import date
 from typing import Any
 
 from labbrain.findings import ERROR, INFO, Finding, display_id, sort_findings
-from labbrain.notes import update_frontmatter
+from labbrain.notes import Note, update_frontmatter
 from labbrain.schema import MODELS
 from labbrain.vault import Vault
 
@@ -27,6 +27,17 @@ def _supersedable(note_type: str | None) -> bool:
 
 def _with_article(word: str) -> str:
     return f"{'an' if word[:1] in 'aeiou' else 'a'} {word}"
+
+
+# Statuses in which a note does not yet take effect: a proposed decision or a planned
+# experiment that sets `supersedes` supersedes nothing until its status moves on and
+# sync runs again.
+NOT_IN_FORCE: dict[str, str] = {"decision": "proposed", "experiment": "planned"}
+
+
+def _in_force(note: Note) -> bool:
+    pending = NOT_IN_FORCE.get(note.type or "")
+    return pending is None or note.get_str("status") != pending
 
 
 @dataclass(frozen=True)
@@ -51,7 +62,7 @@ def plan(vault: Vault) -> tuple[list[Change], list[Conflict]]:
     successors: dict[str, list[str]] = defaultdict(list)
     for note in vault.notes.values():
         target = note.get_str("supersedes")
-        if target:
+        if target and _in_force(note):
             successors[target].append(note.stem)
     for old_id in sorted(successors):
         old = vault.get(old_id)

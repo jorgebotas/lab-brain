@@ -414,6 +414,23 @@ def atomic_write(path: Path, text: str) -> None:
         raise
 
 
+def atomic_create(path: Path, text: str) -> None:
+    """Like atomic_write, but never replace a file: raise FileExistsError instead.
+
+    The text is written to a temp file and hard-linked into place, so the note appears
+    complete or not at all, and two writers racing for one ID cannot overwrite each other.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+        os.chmod(tmp, _target_mode(path))
+        os.link(tmp, path)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+
 def update_frontmatter(path: Path, updates: Mapping[str, Any]) -> bool:
     """Set top-level frontmatter keys in place. Returns True if the file changed.
 

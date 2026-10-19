@@ -162,6 +162,8 @@ def cmd_new(args: argparse.Namespace) -> int:
         raise UsageError("--title is required")
     author = _author(args)
     root, config = _config(args)
+    if args.summary and not config.is_agent(author):
+        print("labbrain: note: --summary is ignored for human authors", file=sys.stderr)
     try:
         path = create(
             root,
@@ -175,6 +177,10 @@ def cmd_new(args: argparse.Namespace) -> int:
             first_author=args.first_author,
             year=args.year,
             name=args.name,
+            summary=args.summary,
+            body=args.body,
+            tags=args.tag,
+            status=args.status,
         )
     except IdError as exc:
         raise UsageError(str(exc)) from exc
@@ -400,6 +406,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("new", "create a skeleton note and print its path")
     _add_id_options(p)
     p.add_argument("--link", action="append", default=[], help="ID to put in `links` (repeatable)")
+    p.add_argument("--summary", default="", help="one line for the For-future-agents block")
+    p.add_argument("--body", default="", help="text placed before the required sections")
+    p.add_argument("--tag", action="append", default=[], help="tag (repeatable)")
+    p.add_argument("--status", default=None, help="initial status (default: the type's default)")
     p.set_defaults(func=cmd_new)
 
     p = add("validate", "check single files (used by the write hook)")
@@ -463,11 +473,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    from labbrain.errors import EngineError
     from labbrain.vault import ConfigError, VaultNotFound
 
     try:
         code = int(args.func(args))
-    except (VaultNotFound, ConfigError, UsageError) as exc:
+    except (VaultNotFound, ConfigError, UsageError, EngineError) as exc:
         print(f"labbrain: {exc}", file=sys.stderr)
         return EXIT_USAGE
     except BrokenPipeError:

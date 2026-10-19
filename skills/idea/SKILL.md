@@ -30,6 +30,8 @@ Capture it without asking any questions, in one Bash call.
 ## Do not
 
 - Do not ask questions, rewrite the idea, or add your own commentary to the note.
-- Do not invent IDs, or tags that are not in the text.
+- Do not invent IDs, hypotheses, protocols, datasets or metric values, or tags that are not in the text.
+- Do not edit `index.md`, the log, anything under `raw/`, or a frozen note.
+- Do not paste text that `phi-scan` matched.
+- Do not write outside the vault.
 - Do not use shell variables or command substitution.
-- Do not edit `index.md` or the log by hand.

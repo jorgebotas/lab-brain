@@ -37,6 +37,7 @@ Never delete a note. A correction is a new note with `supersedes: <ID>`.
 ## IDs, notes and numbers
 
 - IDs come only from the engine (`new`, `new-id`, `exp record`) or from existing notes. Never make one up.
+- Never write outside the vault.
 - Create notes with `uvx --from "${CLAUDE_PLUGIN_ROOT}" labbrain new <type> --title '<title>' --author claude --summary '<one line>'`. It prints the note's absolute path.
 - After editing a note, run `uvx --from "${CLAUDE_PLUGIN_ROOT}" labbrain finish <absolute path> --log '<what you did>' --author claude`. On exit 1, fix the reported fields and run it again.
 - Every number copied into a note carries its source: a run ID, an `[[EXP-...]]` link, or `as of YYYY-MM-DD`.
@@ -52,7 +53,7 @@ Never delete a note. A correction is a new note with `supersedes: <ID>`.
 ## Skills
 
 - `/lab-brain:idea <text>`: capture an idea.
-- `/lab-brain:exp-log <run-id...> [--parent EXP-ID] [--planned]`: log runs as an experiment.
+- `/lab-brain:exp-log <run-id...> [--parent EXP-ID] [--into EXP-ID] [--planned]`: log runs as an experiment.
 - `/lab-brain:decide <summary>`: record a decision.
 - `/lab-brain:handoff`: write the session handoff.
 - `/lab-brain:brief`: show where the project stands.

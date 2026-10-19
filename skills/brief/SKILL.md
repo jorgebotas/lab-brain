@@ -9,8 +9,8 @@ allowed-tools:
 # Brief
 
 1. Run `uvx --from "${CLAUDE_PLUGIN_ROOT}" labbrain brief`.
-2. Show its output to the user verbatim, in a code block.
-3. If it exits non-zero, show the message and stop.
+2. If it exits non-zero, show the message and stop.
+3. Otherwise show its output to the user verbatim, in a code block.
 
 ## Do not
 

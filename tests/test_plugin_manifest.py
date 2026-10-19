@@ -24,6 +24,9 @@ ENGINE_RULES = (
 SKILLS = ("brain-core", "brief", "decide", "exp-log", "handoff", "idea")
 TAKES_ARGUMENTS = ("decide", "exp-log", "idea")
 COMMAND = re.compile(r"\blabbrain ([a-z][a-z-]*)(?: ([a-z][a-z-]*))?")
+ASSIGNMENT = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*=\S")
+FLAG = re.compile(r"(?<![\w-])--[a-z][a-z-]*")
+QUOTED = re.compile(r"'[^']*'")
 
 
 def manifest(name: str) -> dict[str, Any]:
@@ -99,6 +102,26 @@ def test_skill_commands_follow_the_shell_rules(name: str) -> None:
             name,
             body[max(0, match.start() - 40) : match.end() + 20],
         )
+    for line in body.splitlines():
+        if "labbrain " in line:
+            assert not ASSIGNMENT.search(QUOTED.sub("''", line)), (name, line)
+
+
+@pytest.mark.parametrize("name", SKILLS)
+def test_skill_command_flags_exist_in_the_cli(name: str) -> None:
+    _, body = skill(name)
+    top = subparsers(build_parser())
+    for match in COMMAND.finditer(body):
+        first, second = match.groups()
+        parser = top[first]
+        nested = subparsers(parser)
+        if nested:
+            parser = nested[second]
+        accepted = {s for action in parser._actions for s in action.option_strings}
+        rest = re.match(r"[^`\n]*", body[match.end() :])
+        assert rest is not None
+        for flag in FLAG.findall(QUOTED.sub("''", rest.group())):
+            assert flag in accepted, (name, match.group(), flag)
 
 
 def test_brain_core_is_short() -> None:

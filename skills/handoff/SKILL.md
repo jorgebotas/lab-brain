@@ -16,7 +16,7 @@ Pass every value inside single quotes (write a `'` as `'\''`). Never use shell v
 2. Create the note. Use your own agent name for `--agent` if you were dispatched as a named subagent, otherwise `claude`. It prints the note's path:
 
    ```bash
-   uvx --from "${CLAUDE_PLUGIN_ROOT}" labbrain new handoff --title '<what this session did, in a few words>' --author claude --agent claude --summary '<one line: what the next agent should know first>'
+   uvx --from "${CLAUDE_PLUGIN_ROOT}" labbrain new handoff --title '<what this session did, in a few words>' --author claude --agent '<claude, or your own agent name>' --summary '<one line: what the next agent should know first>'
    ```
 
 3. With the Edit tool:
@@ -30,5 +30,8 @@ Pass every value inside single quotes (write a `'` as `'\''`). Never use shell v
 
 - Do not edit an earlier handoff; write a new one.
 - Do not list files that step 1 did not show.
+- Do not invent IDs, hypotheses, protocols, datasets or metric values.
+- Do not edit `index.md`, anything under `raw/`, or a frozen note.
 - Do not paste secrets, data rows or text that `phi-scan` matched.
+- Do not write outside the vault.
 - Do not use shell variables or command substitution.

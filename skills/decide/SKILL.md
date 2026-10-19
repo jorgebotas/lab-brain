@@ -30,4 +30,8 @@ Pass every value inside single quotes (write a `'` as `'\''`). Never use shell v
 
 - Do not edit or delete an existing decision; a reversal is a new decision with `supersedes`.
 - Do not invent alternatives or consequences that the conversation does not support.
+- Do not invent IDs, hypotheses, protocols, datasets or metric values.
+- Do not edit `index.md`, anything under `raw/`, or a frozen note.
+- Do not paste text that `phi-scan` matched.
+- Do not write outside the vault.
 - Do not use shell variables or command substitution.

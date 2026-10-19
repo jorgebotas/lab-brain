@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
-from labbrain.findings import display_id
+from labbrain.findings import ERROR, INFO, Finding, display_id, sort_findings
 from labbrain.notes import update_frontmatter
 from labbrain.schema import MODELS
 from labbrain.vault import Vault
@@ -133,3 +133,17 @@ def apply(vault: Vault, changes: list[Change], today: date) -> tuple[list[str], 
         if changed:
             written.append(change.rel)
     return written, failed
+
+
+def report(
+    changes: list[Change], conflicts: list[Conflict], failed: list[Conflict], *, verb: str
+) -> list[Finding]:
+    """Sync results as findings: conflicts and failed writes are errors, changes are info."""
+    findings = [Finding(c.rel, 1, "sync", ERROR, c.message) for c in conflicts + failed]
+    failed_rels = {c.rel for c in failed}
+    for change in changes:
+        if change.rel in failed_rels:
+            continue
+        fields = ", ".join(f"{key} → {value}" for key, value in change.updates.items())
+        findings.append(Finding(change.rel, 1, "sync", INFO, f"{verb}: {fields} ({change.reason})"))
+    return sort_findings(findings)

@@ -185,6 +185,8 @@ def cmd_new(args: argparse.Namespace) -> int:
     except IdError as exc:
         raise UsageError(str(exc)) from exc
     print(path)
+    if args.finish:
+        return _finish(args, [path], args.finish, author)
     return EXIT_OK
 
 
@@ -199,8 +201,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
-    from labbrain.findings import ERROR, INFO, Finding, sort_findings
-    from labbrain.sync import apply, plan
+    from labbrain.sync import apply, plan, report
     from labbrain.vault import today
 
     vault = _vault(args)
@@ -209,14 +210,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
     if not args.dry_run:
         _, failed = apply(vault, changes, today())
     verb = "would update" if args.dry_run else "updated"
-    findings = [Finding(c.rel, 1, "sync", ERROR, c.message) for c in conflicts + failed]
-    failed_rels = {c.rel for c in failed}
-    for change in changes:
-        if change.rel in failed_rels:
-            continue
-        fields = ", ".join(f"{key} → {value}" for key, value in change.updates.items())
-        findings.append(Finding(change.rel, 1, "sync", INFO, f"{verb}: {fields} ({change.reason})"))
-    return _emit(sort_findings(findings), args.format)
+    return _emit(report(changes, conflicts, failed, verb=verb), args.format)
 
 
 def cmd_index(args: argparse.Namespace) -> int:
@@ -356,6 +350,21 @@ def cmd_schema(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _finish(args: argparse.Namespace, paths: list[Path], text: str, author: str | None) -> int:
+    from labbrain.finish import finish
+    from labbrain.vault import now
+
+    result = finish(paths, log_text=text, author=author, when=now(), vault=args.vault)
+    code = _emit(result.findings, "text")
+    if result.index_updated is not None:
+        print("index.md updated" if result.index_updated else "index.md already up to date")
+    return code
+
+
+def cmd_finish(args: argparse.Namespace) -> int:
+    return _finish(args, args.paths, args.log, args.author or os.environ.get("LABBRAIN_AUTHOR"))
+
+
 # --- parser -----------------------------------------------------------------------
 
 
@@ -410,6 +419,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--body", default="", help="text placed before the required sections")
     p.add_argument("--tag", action="append", default=[], help="tag (repeatable)")
     p.add_argument("--status", default=None, help="initial status (default: the type's default)")
+    p.add_argument("--finish", default="", help="then run `finish` with this log text")
     p.set_defaults(func=cmd_new)
 
     p = add("validate", "check single files (used by the write hook)")
@@ -468,6 +478,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("schema", "print the JSON Schema of the frontmatter models")
     p.add_argument("type", nargs="?", choices=NOTE_TYPES)
     p.set_defaults(func=cmd_schema)
+
+    p = add("finish", "validate written notes, then sync, regenerate the index and log")
+    p.add_argument("paths", nargs="+", type=Path)
+    p.add_argument("--log", required=True, help="text for today's log")
+    p.add_argument("--author")
+    p.set_defaults(func=cmd_finish)
     return parser
 
 

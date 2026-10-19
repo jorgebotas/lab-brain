@@ -86,6 +86,12 @@ def find_root_or_none(start: Path | None = None, explicit: Path | str | None = N
         return None
 
 
+def resolve_config_path(base: Path, value: str) -> Path:
+    """A path from config.yaml: `~` expanded, a relative path taken from `base`."""
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else base / path
+
+
 DEFAULT_HASH_IGNORE: list[str] = [
     "seed",
     "*.seed",
@@ -133,6 +139,7 @@ class Config(BaseModel):
     headline_metrics: list[str] = Field(default_factory=list)
     hash_ignore: list[str] = Field(default_factory=lambda: list(DEFAULT_HASH_IGNORE))
     protocol_key: str = "eval.protocol"
+    dataset_key: str = "data.dataset"
     search: Literal["none", "qmd"] = "none"
     phi: PhiConfig = Field(default_factory=PhiConfig)
 

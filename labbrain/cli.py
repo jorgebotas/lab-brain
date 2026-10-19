@@ -356,6 +356,15 @@ def cmd_schema(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_tracker_fetch(args: argparse.Namespace) -> int:
+    from labbrain.trackers import describe, get_adapter
+
+    root, config = _config(args)
+    records = get_adapter(config, root).fetch(args.runs)
+    print(json.dumps([describe(r, config) for r in records], indent=2, default=str))
+    return EXIT_OK
+
+
 # --- parser -----------------------------------------------------------------------
 
 
@@ -468,6 +477,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("schema", "print the JSON Schema of the frontmatter models")
     p.add_argument("type", nargs="?", choices=NOTE_TYPES)
     p.set_defaults(func=cmd_schema)
+    tracker = add("tracker", "tracker commands")
+    tracker_sub = tracker.add_subparsers(dest="tracker_command", required=True)
+    p = tracker_sub.add_parser("fetch", help="print runs as JSON", parents=[common])
+    p.add_argument("runs", nargs="+", metavar="RUN")
+    p.set_defaults(func=cmd_tracker_fetch)
     return parser
 
 

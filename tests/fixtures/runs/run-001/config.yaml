@@ -1,0 +1,11 @@
+model:
+  name: convnet
+  depth: 4
+optim:
+  lr: 0.001
+data:
+  dataset: DS-20260801-main-split
+  fold: 0
+eval:
+  protocol: EVAL-v2
+seed: 1

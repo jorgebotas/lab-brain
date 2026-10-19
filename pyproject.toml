@@ -61,6 +61,7 @@ include = [
     "*/labbrain/vault.py",
     "*/labbrain/phi.py",
     "*/labbrain/lint/*",
+    "*/labbrain/trackers/*",
 ]
 show_missing = true
 

@@ -5,19 +5,29 @@ from __future__ import annotations
 import os
 import shutil
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 from harness import LOGIN
 from helpers import commit_all, copy_fixture, copy_runs, git
+
+REQUIRED = os.environ.get("LABBRAIN_SMOKE_REQUIRED") == "1"
+
+
+def skip_or_fail(reason: str) -> NoReturn:
+    """Skip, unless LABBRAIN_SMOKE_REQUIRED=1 says a skip would hide a broken setup."""
+    if REQUIRED:
+        pytest.fail(f"LABBRAIN_SMOKE_REQUIRED=1 but {reason}", pytrace=False)
+    pytest.skip(reason)
 
 
 @pytest.fixture
 def claude_bin() -> str:
     path = shutil.which("claude")
     if path is None or not os.access(path, os.X_OK):
-        pytest.skip("claude is not installed")
+        skip_or_fail("claude is not installed")
     if not (os.environ.get("ANTHROPIC_API_KEY") or LOGIN):
-        pytest.skip("set ANTHROPIC_API_KEY, or LABBRAIN_SMOKE_LOGIN=1 to use your login")
+        skip_or_fail("set ANTHROPIC_API_KEY, or LABBRAIN_SMOKE_LOGIN=1 to use your login")
     return path
 
 

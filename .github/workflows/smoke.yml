@@ -26,4 +26,6 @@ jobs:
       - if: env.ANTHROPIC_API_KEY != ''
         run: npm install -g @anthropic-ai/claude-code
       - if: env.ANTHROPIC_API_KEY != ''
+        env:
+          LABBRAIN_SMOKE_REQUIRED: "1"
         run: uv sync --locked && uv run pytest -m smoke -v

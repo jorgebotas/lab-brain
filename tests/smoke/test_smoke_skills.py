@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -33,8 +34,9 @@ def test_idea(claude_bin: str, smoke_vault: Path) -> None:
     assert "Don't forget" in path.read_text(encoding="utf-8")
     assert main(["--vault", str(smoke_vault), "validate", str(path)]) == 0
     assert main(["--vault", str(smoke_vault), "lint"]) == 0
-    logs = "".join(p.read_text(encoding="utf-8") for p in (smoke_vault / "log").glob("*.md"))
-    assert "idea:" in logs
+    today_log = smoke_vault / "log" / f"{date.today():%Y-%m-%d}.md"
+    assert today_log.is_file(), today_log
+    assert "idea:" in today_log.read_text(encoding="utf-8")
 
 
 def test_exp_log_with_parent(claude_bin: str, smoke_vault: Path) -> None:
@@ -54,15 +56,18 @@ def test_exp_log_with_parent(claude_bin: str, smoke_vault: Path) -> None:
     parent = [r["config"] for r in adapter.fetch(parent_run_ids(Vault.load(smoke_vault), PARENT))]
     child = [r["config"] for r in adapter.fetch(["run-c1", "run-c2"])]
     expected = render_setup(config_diff(PARENT, parent, child, config.hash_ignore))
+    rows = [line for line in expected.splitlines() if line.startswith("| ")]
+    varied = [line for line in expected.splitlines() if line.startswith("Varied across ")]
+    assert rows, expected
     text = path.read_text(encoding="utf-8")
-    for row in expected.splitlines():
-        if row.startswith("| "):
-            assert row in text, row
+    for line in rows + varied:
+        assert line in text, line
 
 
 def test_exp_log_refuses_done_without_protocol(claude_bin: str, smoke_vault: Path) -> None:
     folder = smoke_vault / "experiments"
     before = notes_in(folder)
+    # run_skill fails on any permission denial, so the engine really ran and refused.
     result = run_skill(claude_bin, smoke_vault, "/lab-brain:exp-log run-noproto")
     for path in notes_in(folder) - before:
         data = parse_note(path, smoke_vault).data

@@ -19,7 +19,7 @@ CONFIG = Config(
 
 def test_engine_adrs_are_valid_decision_notes() -> None:
     paths = sorted((REPO / "docs" / "decisions").glob("ADR-*.md"))
-    assert len(paths) == 8
+    assert len(paths) == 12
     for path in paths:
         findings = check_note(parse_note(path, REPO), CONFIG)
         assert findings == [], (path.name, [f.to_dict() for f in findings])

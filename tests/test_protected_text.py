@@ -150,3 +150,96 @@ def test_into_refuses_new_protected_text_but_not_old(
     )
     assert code == 0, err
     assert parse_note(planned, runs_vault).data["status"] == "done"
+
+
+PARENT = "EXP-20260910-label-smoothing"
+
+
+def visit_run(vault: Path) -> None:
+    """A run whose generated config diff holds a date next to a context word."""
+    import shutil
+
+    shutil.copytree(vault / "runs" / "run-c1", vault / "runs" / "run-visit")
+    config = vault / "runs" / "run-visit" / "config.yaml"
+    config.write_text(config.read_text() + "visit_cutoff: 2021-06-30\n")
+
+
+def test_generated_setup_is_left_to_lint(
+    runs_vault: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    visit_run(runs_vault)
+    code, out, err = run(
+        capsys,
+        "exp",
+        "record",
+        "run-visit",
+        "--author",
+        "alice",
+        "--title",
+        "Cutoff",
+        "--parent",
+        PARENT,
+    )
+    assert code == 0, err
+    assert "| visit_cutoff | — |" in Path(out.strip()).read_text()
+    code, out, err = run(
+        capsys,
+        "exp",
+        "record",
+        "run-visit",
+        "--author",
+        "alice",
+        "--title",
+        f"Chart {MRN}",
+        "--parent",
+        PARENT,
+    )
+    assert code == 2 and err == refused("phi-mrn")
+
+
+def test_generated_setup_is_left_to_lint_on_into(
+    runs_vault: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    visit_run(runs_vault)
+    _, out, _ = run(capsys, "new", "experiment", "--title", "Plan", "--author", "alice")
+    planned = Path(out.strip())
+    code, _, err = run(
+        capsys,
+        "exp",
+        "record",
+        "run-visit",
+        "--author",
+        "alice",
+        "--into",
+        planned.stem,
+        "--parent",
+        PARENT,
+    )
+    assert code == 0, err
+    assert "| visit_cutoff | — |" in planned.read_text()
+
+
+def test_into_hypothesis_lines_can_be_allowlisted(
+    runs_vault: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, out, _ = run(capsys, "new", "experiment", "--title", "Plan", "--author", "alice")
+    planned = Path(out.strip())
+    hypothesis = f"MRN {MRN} is synthetic."
+    rel = planned.relative_to(runs_vault).as_posix()
+    (runs_vault / ".labbrain" / "phi-allow.yaml").write_text(
+        f"- file: {rel}\n  rule: phi-mrn\n  line_sha256: {line_hash('hypothesis: ' + hypothesis)}\n"
+        "  author: alice\n  date: 2026-10-15\n"
+    )
+    code, _, err = run(
+        capsys,
+        "exp",
+        "record",
+        "run-c1",
+        "--author",
+        "alice",
+        "--into",
+        planned.stem,
+        "--hypothesis",
+        hypothesis,
+    )
+    assert code == 0, err

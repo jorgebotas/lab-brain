@@ -619,3 +619,19 @@ def test_an_unclosed_marker_is_refused(
         == f"labbrain: {planned.stem}: the ## Setup section has an unclosed labbrain:setup marker\n"
     )
     assert planned.read_bytes() == before
+
+
+def test_date_keys_inside_lists_render(
+    runs_vault: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    variant(runs_vault, "run-aug")
+    config = runs_vault / "runs" / "run-aug" / "config.yaml"
+    config.write_text(config.read_text() + "aug: [{2026-01-01: a, b: c}]\n")
+    code, out, err = run(capsys, "tracker", "diff", "run-aug", "--parent", PARENT)
+    assert code == 0, err
+    assert '| aug | — | [{"2026-01-01":"a","b":"c"}] |' in out
+    code, out, err = record(
+        capsys, "run-aug", "--author", "claude", "--title", "Aug", "--parent", PARENT
+    )
+    assert code == 0, err
+    assert '| aug | — | [{"2026-01-01":"a","b":"c"}] |' in Path(out.strip()).read_text()

@@ -12,7 +12,7 @@ from typing import Any, get_args
 
 from ruamel.yaml.comments import CommentedMap
 
-from labbrain.confighash import is_ignored
+from labbrain.confighash import is_ignored, string_keys
 from labbrain.errors import EngineError
 from labbrain.findings import display_id, strip_controls
 from labbrain.notes import (
@@ -110,7 +110,8 @@ def escape_cell(text: str) -> str:
 def _cell(value: Any) -> str:
     if value is _ABSENT:
         return "—"
-    return escape_cell(json.dumps(value, separators=(",", ":"), ensure_ascii=False, default=str))
+    text = json.dumps(string_keys(value), separators=(",", ":"), ensure_ascii=False, default=str)
+    return escape_cell(text)
 
 
 def _varied(keys: Sequence[str], label: str) -> list[str]:
@@ -389,12 +390,17 @@ def _fill(
         updated = update_frontmatter_text(text, {**fields, "links": merged}, name=note.path.name)
     except ValueError:
         raise RecordError(f"{label}: frontmatter cannot be updated") from None
-    text = updated if updated is not None else text
-    if config.protected_data:
+    if config.protected_data and "hypothesis" in fields:
+        # Only the user's text is checked; generated Setup/Results are the phi lint
+        # rule's (see scaffold.create).
         from labbrain.phi import check_note_text
 
-        check_note_text(root, config, note.rel, text, before=original)
-    atomic_write(note.path, text)
+        probe = update_frontmatter_text(
+            original, {"hypothesis": fields["hypothesis"]}, name=note.path.name
+        )
+        if probe is not None:
+            check_note_text(root, config, note.rel, probe, before=original)
+    atomic_write(note.path, updated if updated is not None else text)
     return note.path
 
 
@@ -489,6 +495,7 @@ def record(
         links=links,
         summary=req.summary,
         extra=fields,
+        generated=[*(k for k in fields if k != "hypothesis"), "Setup", "Results"],
         section_text={
             "Hypothesis": hypothesis,
             "Setup": marked(SETUP_MARKER, setup),

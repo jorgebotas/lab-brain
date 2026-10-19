@@ -358,3 +358,26 @@ def test_duplicate_free_text_run_ids_are_not_echoed() -> None:
         check_run_ids([name, name])
     assert str(info.value) == "invalid run id"
     check_run_ids(["run-c1", "run-c2"])
+
+
+def test_date_keys_inside_lists_print(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = make_vault(tmp_path / "v")
+    add_run(root, "r1", {"config.yaml": "aug: [{2026-01-01: a, b: c}]\n"})
+    assert main(["--vault", str(root), "tracker", "fetch", "r1"]) == 0
+    [data] = json.loads(capsys.readouterr().out)
+    assert data["config"]["aug"] == [{"2026-01-01": "a", "b": "c"}]
+
+
+def test_two_names_for_one_run_are_duplicates(vault: Path) -> None:
+    (vault / "runs" / "run-alias").symlink_to(vault / "runs" / "run-c1")
+    with pytest.raises(TrackerError) as info:
+        adapter(vault).fetch(["run-c1", "run-alias"])
+    assert str(info.value) == "run run-alias given more than once"
+
+
+def test_differently_cased_duplicates_are_refused(tmp_path: Path, vault: Path) -> None:
+    if not _case_insensitive(tmp_path):
+        pytest.skip("needs a case-insensitive filesystem")
+    with pytest.raises(TrackerError) as info:
+        adapter(vault).fetch(["run-c1", "RUN-C1"])
+    assert str(info.value) == "run RUN-C1 given more than once"

@@ -121,3 +121,29 @@ def test_a_vault_in_another_repository_excludes_nothing(tmp_path: Path) -> None:
     other = code_repo(tmp_path / "notes")
     write(repo, "new.py", "x = 1\n")
     assert code_sha(repo, exclude=other).dirty is True
+
+
+def test_a_nested_repository_vault_is_excluded(tmp_path: Path) -> None:
+    repo = code_repo(tmp_path / "code")
+    write(repo, ".gitignore", "")
+    commit_all(repo)
+    vault = make_vault(repo / "brain")
+    git(vault, "init", "-q", "-b", "main")
+    write(vault, "ideas/inbox/IDEA-20261015-x.md", "x\n")
+    assert code_sha(repo, exclude=vault).dirty is False
+    write(repo, "train.py", "print('changed')\n")
+    assert code_sha(repo, exclude=vault).dirty is True
+
+
+def test_a_submodule_vault_is_excluded(tmp_path: Path) -> None:
+    source = code_repo(tmp_path / "vault-source")
+    repo = code_repo(tmp_path / "code")
+    git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(source), "brain")
+    commit_all(repo)
+    vault = repo / "brain"
+    assert code_sha(repo, exclude=vault).dirty is False
+    write(vault, "train.py", "print('vault edit')\n")
+    write(vault, "notes.md", "x\n")
+    assert code_sha(repo, exclude=vault).dirty is False
+    write(repo, "train.py", "print('changed')\n")
+    assert code_sha(repo, exclude=vault).dirty is True

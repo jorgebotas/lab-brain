@@ -96,3 +96,23 @@ def test_impossible_created_date_is_a_finding_everywhere(
             assert (
                 "ideas/IDEA-20261001-odd.md:1: error [schema] frontmatter is not valid YAML" in out
             )
+
+
+def test_a_recursive_alias_is_unparsable_frontmatter(
+    vault_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from labbrain.cli import main
+
+    path = vault_dir / "ideas" / "IDEA-20261001-loop.md"
+    path.write_text(
+        "---\nid: IDEA-20261001-loop\ntype: idea\ntitle: Loop\ncreated: 2026-10-01\n"
+        "updated: 2026-10-01\nauthor: alice\nstatus: open\ntags: &a [*a]\n---\n## Idea\n\nx\n"
+    )
+    for argv, expected in ((["validate", str(path)], 1), (["lint"], 1), (["brief"], 0)):
+        assert main(argv) == expected, argv
+        out, err = capsys.readouterr()
+        assert "internal error" not in err
+        if argv[0] != "brief":
+            assert (
+                "ideas/IDEA-20261001-loop.md:1: error [schema] frontmatter is not valid YAML" in out
+            )

@@ -384,12 +384,14 @@ def cmd_brief(args: argparse.Namespace) -> int:
 
 
 def cmd_tracker_fetch(args: argparse.Namespace) -> int:
+    from labbrain.confighash import string_keys
     from labbrain.trackers import check_run_ids, describe, get_adapter
 
     check_run_ids(args.runs)
     root, config = _config(args)
     records = get_adapter(config, root).fetch(args.runs)
-    print(json.dumps([describe(r, config) for r in records], indent=2, default=str))
+    described = string_keys([describe(r, config) for r in records])
+    print(json.dumps(described, indent=2, default=str))
     return EXIT_OK
 
 

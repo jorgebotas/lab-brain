@@ -18,9 +18,9 @@ from typing import Any
 
 import yaml
 
-from labbrain.confighash import flatten, well_formed
+from labbrain.confighash import flatten
 from labbrain.findings import sanitize
-from labbrain.notes import safe_load
+from labbrain.notes import safe_load, well_formed
 from labbrain.trackers.base import RUN_ID_RE, RUN_STATUSES, RunRecord, TrackerError
 from labbrain.vault import Config, resolve_config_path
 
@@ -131,7 +131,19 @@ class LocalAdapter:
         return cls(runs_dir_for(config, root), protected_roots(config, root))
 
     def fetch(self, run_ids: Sequence[str]) -> list[RunRecord]:
-        return [self._load(run_id) for run_id in run_ids]
+        """The runs, in request order. Two IDs naming one run directory (`RUN-C1` beside
+        `run-c1` on a case-insensitive filesystem, or a symlinked alias) are refused, as a
+        repeated ID is, so no metric is recorded twice."""
+        records: list[RunRecord] = []
+        seen: set[tuple[int, int]] = set()
+        for run_id in run_ids:
+            records.append(self._load(run_id))
+            identity = _identity(self.runs_dir / run_id)
+            if identity is not None and identity in seen:
+                raise TrackerError(sanitize(f"run {run_id} given more than once"))
+            if identity is not None:
+                seen.add(identity)
+        return records
 
     def run_url(self, run_id: str) -> str | None:
         return self._load(run_id)["url"]

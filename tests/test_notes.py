@@ -369,3 +369,17 @@ def test_tool_written_floats_read_back_as_floats(tmp_path: Path, value: float) -
     path.write_text(SAMPLE)
     update_frontmatter(path, {"score": value})
     assert parse_note(path, tmp_path).get("score") == value
+
+
+def test_alias_fan_out_is_walked_once_and_cycles_are_refused() -> None:
+    import time
+
+    from labbrain.notes import UnreadableValueError, safe_load
+
+    levels = ["l0: &l0 [x, y]"] + [f"l{i}: &l{i} [*l{i - 1}, *l{i - 1}]" for i in range(1, 25)]
+    started = time.perf_counter()
+    assert safe_load("\n".join(levels))["l1"] == [["x", "y"], ["x", "y"]]
+    assert time.perf_counter() - started < 2
+    for text in ("tags: &a [*a]\n", "a: &x {b: *x}\n"):
+        with pytest.raises(UnreadableValueError):
+            safe_load(text)

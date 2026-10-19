@@ -7,7 +7,7 @@ by the tool.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -172,7 +172,15 @@ def create(
     status: str | None = None,
     extra: Mapping[str, Any] | None = None,
     section_text: Mapping[str, str] | None = None,
+    generated: Collection[str] = (),
 ) -> Path:
+    """Write a new note and return its path.
+
+    `generated` names `extra` fields and `section_text` sections the engine wrote (a
+    config diff, metrics): in a protected project the PHI pre-write check scans only
+    what the user supplied (title and the ID minted from it, summary, body, ...) and
+    leaves generated text to the phi lint rule, where a hit can be allowlisted.
+    """
     if status is not None and status not in allowed_statuses(note_type):
         choices = ", ".join(allowed_statuses(note_type))
         raise ScaffoldError(f"--status for a new {note_type} must be one of: {choices}")
@@ -225,7 +233,22 @@ def create(
         if config.protected_data:
             from labbrain.phi import check_note_text
 
-            check_note_text(root, config, path.relative_to(root).as_posix(), text)
+            user_text = skeleton(
+                note_type,
+                note_id=note_id,
+                title=title,
+                author=author,
+                now=now,
+                config=config,
+                links=links,
+                extra={k: v for k, v in fields.items() if k not in generated},
+                summary=summary,
+                body=body,
+                tags=tags,
+                status=status,
+                section_text={k: v for k, v in (section_text or {}).items() if k not in generated},
+            )
+            check_note_text(root, config, path.relative_to(root).as_posix(), user_text)
         try:
             atomic_create(path, text)
         except FileExistsError:

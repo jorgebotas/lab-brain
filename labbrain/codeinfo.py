@@ -33,10 +33,14 @@ def code_sha(repo_path: Path, *, exclude: Path | None = None) -> CodeInfo:
         raise CodeError("the code repository has no commits") from None
     pathspec = ["."]
     # git itself places the vault (its toplevel and prefix are canonical, letter case
-    # included), and the prefix is excluded literally: a vault named `v*` is no glob.
+    # included), and the path is excluded literally: a vault named `v*` is no glob.
     vault = gitutil.open_repo(exclude) if exclude is not None and exclude.is_dir() else None
     if vault is not None and vault.top == repo.top and vault.prefix:
         pathspec.append(f":(exclude,literal){vault.prefix}")
+    elif vault is not None and vault.top != repo.top and vault.top.is_relative_to(repo.top):
+        # The vault is its own repository (a submodule or a nested clone) inside the code
+        # repository, which sees it as a single path.
+        pathspec.append(f":(exclude,literal){vault.top.relative_to(repo.top).as_posix()}")
     try:
         status = repo.git("status", "--porcelain", "--untracked-files=normal", "--", *pathspec)
     except gitutil.GitError:

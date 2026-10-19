@@ -22,6 +22,10 @@ def _title(note: Note) -> str:
     return _clean(note.get_str("title") or "")
 
 
+def _row(note: Note) -> str:
+    return f"  {_clean(note.stem)}  {_title(note)}"
+
+
 def _newest(notes: list[Note]) -> list[Note]:
     return sorted(notes, key=lambda n: n.stem, reverse=True)
 
@@ -33,7 +37,7 @@ def _with_status(vault: Vault, note_type: str, status: str) -> list[Note]:
 def _listing(notes: list[Note], limit: int) -> list[str]:
     if not notes:
         return ["  none"]
-    rows = [f"  {n.stem}  {_title(n)}" for n in notes[:limit]]
+    rows = [_row(n) for n in notes[:limit]]
     if len(notes) > limit:
         rows.append(f"  … and {len(notes) - limit} more")
     return rows
@@ -51,14 +55,14 @@ def build_brief(vault: Vault, findings: list[Finding], *, short: bool, warning: 
     errors = sum(1 for f in findings if f.severity == ERROR)
     warnings = sum(1 for f in findings if f.severity == WARNING)
     if short:
-        last = f"{handoffs[0].stem}  {_title(handoffs[0])}" if handoffs else "none"
+        last = f"{_clean(handoffs[0].stem)}  {_title(handoffs[0])}" if handoffs else "none"
         counts = (
             f"Running {len(running)} · Planned {len(planned)} · Stale claims {len(stale)}"
             f" · Open ideas {open_ideas} · Lint errors {errors}"
         )
         return "\n".join([*head, f"Last handoff: {last}", counts]) + "\n"
     lines = [*head, "", "Recent handoffs:"]
-    lines += [f"  {n.stem}  {_title(n)}" for n in handoffs[:HANDOFF_LIMIT]] or ["  none"]
+    lines += [_row(n) for n in handoffs[:HANDOFF_LIMIT]] or ["  none"]
     lines.append("")
     for label, notes in (
         ("Experiments running", running),

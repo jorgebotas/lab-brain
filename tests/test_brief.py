@@ -102,9 +102,9 @@ def test_full_brief_stays_within_limits(
 def test_short_brief_stays_within_limits(
     busy_vault: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    code, out, _ = run(capsys, "--vault", str(busy_vault), "brief", "--short")
+    code, out, err = run(capsys, "--vault", str(busy_vault), "brief", "--short")
     lines = out.splitlines()
-    assert code == 0 and len(lines) == 4
+    assert code == 0 and err == "" and len(lines) == 4
     assert lines[2] == "Last handoff: HO-20261005-0900-claude  Session 5"
     assert lines[3].startswith(
         "Running 7 · Planned 2 · Stale claims 6 · Open ideas 3 · Lint errors "
@@ -115,3 +115,20 @@ def test_brief_without_handoffs(tmp_path: Path, capsys: pytest.CaptureFixture[st
     root = make_vault(tmp_path / "v")
     code, out, _ = run(capsys, "--vault", str(root), "brief", "--short")
     assert code == 0 and "Last handoff: none" in out.splitlines()
+
+
+def test_brief_strips_controls_from_note_ids(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = make_vault(tmp_path / "v")
+    bad = "\x1b[31m"
+    bidi = "\u202e"
+    eid = f"EXP-20261001-a{bad}red{bidi}"
+    write(root, f"experiments/{eid}.md", note_text(eid, "experiment", status="running"))
+    hid = f"HO-20261009-0900-a{bad}red{bidi}"
+    write(root, f"handoffs/{hid}.md", note_text(hid, "handoff", title="Session"))
+    for argv in (("brief",), ("brief", "--short")):
+        code, out, _ = run(capsys, "--vault", str(root), *argv)
+        assert code == 0
+        assert "\x1b" not in out and bidi not in out
+        assert "red" in out

@@ -34,6 +34,8 @@ trap cleanup EXIT
 config_dir=$(mktemp -d)
 vault_dir=$(mktemp -d)
 export CLAUDE_CONFIG_DIR="$config_dir"
+# uv 0.7-0.10 may serve a stale `uvx --from <checkout>` build despite cache-keys; rebuild.
+export UV_NO_CACHE=1
 
 claude plugin marketplace add "$repo"
 claude plugin install lab-brain@lab-brain

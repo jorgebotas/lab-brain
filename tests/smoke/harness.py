@@ -49,7 +49,8 @@ def run_skill(claude: str, vault: Path, prompt: str) -> dict[str, Any]:
     ]
     if LOGIN:
         cmd += ["--setting-sources", "project"]
-    env = {**os.environ, "LABBRAIN_VAULT": str(vault)}
+    # uv 0.7-0.10 may serve a stale `uvx --from <checkout>` build despite cache-keys; rebuild.
+    env = {**os.environ, "LABBRAIN_VAULT": str(vault), "UV_NO_CACHE": "1"}
     env.pop("LABBRAIN_NOW", None)
     proc = subprocess.run(
         cmd,

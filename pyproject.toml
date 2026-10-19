@@ -30,6 +30,8 @@ only-include = [
     "tests",
     "docs",
     "scripts",
+    "skills",
+    ".claude-plugin",
     "README.md",
     "LICENSE",
     "CHANGELOG.md",

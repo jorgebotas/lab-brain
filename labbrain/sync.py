@@ -123,6 +123,10 @@ def apply(vault: Vault, changes: list[Change], today: date) -> tuple[list[str], 
             changed = update_frontmatter(
                 vault.root / change.rel, {**change.updates, "updated": today}
             )
+        except UnicodeDecodeError:  # its message quotes a byte of the file
+            message = "could not write: file is not valid UTF-8"
+            failed.append(Conflict(change.note_id, change.rel, message))
+            continue
         except ValueError as exc:  # names only the file and a line
             failed.append(Conflict(change.note_id, change.rel, f"could not write: {exc}"))
             continue

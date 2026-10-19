@@ -330,3 +330,33 @@ def test_create_gives_up_after_five_attempts(
     code, _, err = run(capsys, "new", "idea", "--title", "Crowded", "--author", "alice")
     assert code == 2 and "could not create" in err
     assert len(attempts) == scaffold.CREATE_ATTEMPTS
+
+
+@pytest.mark.parametrize("summary", ["```", "~~~ x", "  ```python"])
+def test_summary_must_not_open_a_code_fence(
+    vault_dir: Path, capsys: pytest.CaptureFixture[str], summary: str
+) -> None:
+    code, _, err = run(
+        capsys, "new", "idea", "--title", "Fenced", "--author", "claude", "--summary", summary
+    )
+    assert code == 2 and err == "labbrain: --summary must not start a code fence\n"
+    assert not list((vault_dir / "ideas" / "inbox").glob("IDEA-20261015-*"))
+
+
+@pytest.mark.parametrize("body", ["```\ncode", "~~~\na\n~~~\n```py\nb"])
+def test_body_with_an_unclosed_fence_is_refused(
+    vault_dir: Path, capsys: pytest.CaptureFixture[str], body: str
+) -> None:
+    code, _, err = run(
+        capsys, "new", "idea", "--title", "Fenced", "--author", "claude", "--body", body
+    )
+    assert code == 2 and err == "labbrain: --body has an unclosed code fence\n"
+    assert not list((vault_dir / "ideas" / "inbox").glob("IDEA-20261015-*"))
+
+
+def test_body_with_closed_fences_is_kept(
+    vault_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = new(capsys, "idea", "--title", "Fenced", "--author", "alice", "--body", "```\nx\n```")
+    assert "## Notes\n\n```\nx\n```\n" in path.read_text()
+    assert main(["validate", str(path)]) == 0

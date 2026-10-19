@@ -15,7 +15,15 @@ from ruamel.yaml.comments import CommentedMap
 from labbrain.confighash import is_ignored
 from labbrain.errors import EngineError
 from labbrain.findings import display_id, strip_controls
-from labbrain.notes import Note, atomic_write, split_frontmatter, update_frontmatter_text
+from labbrain.notes import (
+    H2_RE,
+    HEADING_RE,
+    Note,
+    atomic_write,
+    split_frontmatter,
+    update_frontmatter_text,
+)
+from labbrain.scaffold import FENCES, create, one_line
 from labbrain.schema import ExperimentNote
 from labbrain.trackers.base import RunRecord, TrackerAdapter
 from labbrain.vault import Config, Vault, resolve_config_path
@@ -95,7 +103,8 @@ def parent_run_ids(vault: Vault, parent_id: str) -> list[str]:
 
 
 def escape_cell(text: str) -> str:
-    return text.replace("|", "\\|")
+    """`text` safe in a table cell: on one line (no injected rows or headings), `|` escaped."""
+    return one_line(text).replace("|", "\\|")
 
 
 def _cell(value: Any) -> str:
@@ -105,7 +114,7 @@ def _cell(value: Any) -> str:
 
 
 def _varied(keys: Sequence[str], label: str) -> list[str]:
-    return [f"{label}: {', '.join(keys)}."] if keys else []
+    return [f"{label}: {', '.join(one_line(k) for k in keys)}."] if keys else []
 
 
 def render_setup(diff: ConfigDiff) -> str:
@@ -133,7 +142,8 @@ def render_setup(diff: ConfigDiff) -> str:
 
 
 def render_runs(run_ids: Sequence[str], varied: Sequence[str]) -> str:
-    lines = [f"Runs: {', '.join(run_ids)}.", *_varied(varied, "Varied across these runs")]
+    runs = ", ".join(one_line(r) for r in run_ids)
+    lines = [f"Runs: {runs}.", *_varied(varied, "Varied across these runs")]
     return "\n".join(lines) + "\n"
 
 
@@ -271,32 +281,76 @@ def render_results(metrics: Sequence[Mapping[str, Any]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def append_to_section(text: str, heading: str, block: str) -> str:
-    """`text` with `block` added at the end of its `## heading` section, fences respected."""
-    _, _, body_line = split_frontmatter(text)
-    lines = text.splitlines(keepends=True)
+SETUP_MARKER, RESULTS_MARKER = "setup", "results"
+
+
+def marked(marker: str, block: str) -> str:
+    """`block` between the comments that let a later `--into` find and replace it."""
+    return f"<!-- labbrain:{marker} -->\n\n{block.strip(chr(10))}\n\n<!-- /labbrain:{marker} -->\n"
+
+
+def _section_bounds(lines: Sequence[str], body_start: int, heading: str) -> tuple[int, int]:
+    """(heading line index, index of the next level-2 heading or len) for `## heading`."""
     start, end, fence = None, len(lines), False
-    for i in range(body_line - 1, len(lines)):
-        stripped = lines[i].lstrip()
-        if stripped.startswith(("```", "~~~")):
+    for i in range(body_start, len(lines)):
+        if lines[i].lstrip().startswith(FENCES):
             fence = not fence
             continue
-        if fence or not lines[i].startswith("## "):
+        match = None if fence else H2_RE.match(lines[i].rstrip("\r\n"))
+        if match is None:
             continue
         if start is not None:
             end = i
             break
-        if lines[i][3:].strip() == heading:
+        if match.group(1) == heading:
             start = i
     if start is None:
         raise RecordError(f"note has no ## {heading} section")
+    return start, end
+
+
+def _marked_block(
+    lines: Sequence[str], start: int, end: int, marker: str
+) -> tuple[int, int] | None:
+    """(opening, closing) line indexes of the `marker` block in lines[start:end], if any."""
+    opening, fence = None, False
+    for i in range(start + 1, end):
+        stripped = lines[i].strip()
+        if stripped.startswith(FENCES):
+            fence = not fence
+        elif fence:
+            continue
+        elif opening is None and stripped == f"<!-- labbrain:{marker} -->":
+            opening = i
+        elif opening is not None and stripped == f"<!-- /labbrain:{marker} -->":
+            return opening, i
+    if opening is not None:
+        raise ValueError(marker)
+    return None
+
+
+def append_to_section(text: str, heading: str, block: str, *, marker: str | None = None) -> str:
+    """`text` with `block` added at the end of its `## heading` section, fences respected.
+
+    With `marker`, a `marker` block already in the section (see `marked`) is replaced in
+    place instead, so filling a note again leaves no stale block. Raises ValueError(marker)
+    for an opening marker without its closing one.
+    """
+    _, _, body_line = split_frontmatter(text)
+    lines = text.splitlines(keepends=True)
+    start, end = _section_bounds(lines, body_line - 1, heading)
     newline = "\r\n" if lines[start].endswith("\r\n") else "\n"
+    rows = [row + newline for row in block.rstrip("\n").split("\n")]
+    found = _marked_block(lines, start, end, marker) if marker else None
+    if found is not None:
+        opening, closing = found
+        return "".join([*lines[:opening], *rows, *lines[closing + 1 :]])
     head = lines[:end]
     while len(head) - 1 > start and not head[-1].strip():
         head.pop()
     if not head[-1].endswith(("\n", "\r\n")):
         head[-1] += newline
-    insertion = [newline, *(row + newline for row in block.rstrip("\n").split("\n"))]
+    insertion = [newline, *rows]
     tail = lines[end:]
     if tail:
         insertion.append(newline)
@@ -306,12 +360,23 @@ def append_to_section(text: str, heading: str, block: str) -> str:
 def _fill(
     note: Note, label: str, fields: dict[str, Any], links: list[str], setup: str, results: str
 ) -> Path:
-    """Append Setup/Results and update the frontmatter of `note` in one atomic write."""
+    """Write Setup/Results and update the frontmatter of `note` in one atomic write."""
     merged = list(dict.fromkeys([*note.get_list("links"), *links]))
-    with open(note.path, encoding="utf-8", newline="") as handle:
-        text = handle.read()
-    text = append_to_section(text, "Setup", setup)
-    text = append_to_section(text, "Results", results)
+    try:
+        with open(note.path, "rb") as handle:
+            text = handle.read().decode("utf-8")
+    except UnicodeDecodeError:
+        raise RecordError(f"{label}: note is not valid UTF-8") from None
+    for heading, marker, block in (
+        ("Setup", SETUP_MARKER, setup),
+        ("Results", RESULTS_MARKER, results),
+    ):
+        try:
+            text = append_to_section(text, heading, marked(marker, block), marker=marker)
+        except ValueError:
+            raise RecordError(
+                f"{label}: the ## {heading} section has an unclosed labbrain:{marker} marker"
+            ) from None
     try:
         updated = update_frontmatter_text(text, {**fields, "links": merged}, name=note.path.name)
     except ValueError:
@@ -320,13 +385,22 @@ def _fill(
     return note.path
 
 
+def _check_line(flag: str, text: str) -> None:
+    """Refuse one-line text that would start a heading or a code fence in the body."""
+    if HEADING_RE.match(text):
+        raise RecordError(f"{flag} must not be a heading")
+    if text.startswith(FENCES):
+        raise RecordError(f"{flag} must not start a code fence")
+
+
 def record(
     root: Path, config: Config, req: RecordRequest, adapter: TrackerAdapter | None = None
 ) -> Path:
     """Create an experiment note from runs, or fill in a planned or running one."""
-    from labbrain.scaffold import create, one_line
     from labbrain.trackers import check_run_ids, describe, get_adapter
 
+    hypothesis = one_line(req.hypothesis or "")
+    _check_line("--hypothesis", hypothesis)
     check_run_ids(req.run_ids)
     vault = Vault.load(root, config)
     for note_id in [req.parent, *req.links]:
@@ -378,7 +452,6 @@ def record(
         "dataset": dataset,
         "metrics": metrics,
     }
-    hypothesis = one_line(req.hypothesis or "")
     if hypothesis:
         fields["hypothesis"] = hypothesis
     if req.parent:
@@ -403,5 +476,9 @@ def record(
         links=links,
         summary=req.summary,
         extra=fields,
-        section_text={"Hypothesis": hypothesis, "Setup": setup, "Results": results},
+        section_text={
+            "Hypothesis": hypothesis,
+            "Setup": marked(SETUP_MARKER, setup),
+            "Results": marked(RESULTS_MARKER, results),
+        },
     )

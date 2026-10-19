@@ -150,3 +150,24 @@ def test_tracker_diff_cli_unknown_parent(
     copy_runs(vault_dir)
     assert main(["tracker", "diff", "run-c1", "--parent", "EXP-20990101-nope"]) == 2
     assert "no experiment with ID" in capsys.readouterr().err
+
+
+def test_keys_with_line_breaks_cannot_add_headings() -> None:
+    from labbrain.experiments import render_results
+
+    sneaky = "a\n## Results\nb"
+    diff = config_diff(
+        PARENT, [{sneaky: 1, "x": 0}], [{sneaky: 2, "x": 0}, {sneaky: 2, "x": 1}], []
+    )
+    varied = config_diff(PARENT, [{"k": 1}], [{"k": 1, sneaky: 1}, {"k": 1, sneaky: 2}], [])
+    texts = [
+        render_setup(diff),
+        render_setup(varied),
+        render_runs(["run-a"], [sneaky]),
+        render_results([{"name": sneaky, "value": 1.0, "split": None, "run_id": "run-a"}]),
+    ]
+    for text in texts:
+        assert not any(line.startswith("#") for line in text.splitlines()), text
+    assert "| a ## Results b | 1 | 2 |" in texts[0]
+    assert "a ## Results b" in texts[1] and "a ## Results b" in texts[2]
+    assert "| a ## Results b | 1.0 |" in texts[3]

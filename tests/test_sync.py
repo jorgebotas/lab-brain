@@ -231,3 +231,16 @@ def test_apply_reports_a_failed_write_and_continues(
             "could not write: ADR-20261001-a.md: frontmatter cannot be updated (line 3)",
         )
     ]
+
+
+def test_a_note_that_is_not_utf8_is_reported_without_its_bytes(tmp_path: Path) -> None:
+    from labbrain.vault import load_config
+
+    root = make_vault(tmp_path / "v")
+    path = write(root, "decisions/x.md", "---\nid: x\nstatus: accepted\n---\ncaf")
+    path.write_bytes(path.read_bytes() + b"\xe9\n")
+    vault = Vault.load(root, load_config(root))
+    change = Change("x", "decisions/x.md", {"status": "superseded"}, "superseded by y")
+    written, failed = apply(vault, [change], date(2026, 10, 15))
+    assert written == []
+    assert [f.message for f in failed] == ["could not write: file is not valid UTF-8"]

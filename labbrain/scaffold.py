@@ -33,6 +33,8 @@ NEW_STATUSES: dict[str, tuple[str, ...]] = {
     "decision": ("proposed", "accepted"),
 }
 CREATE_ATTEMPTS = 5
+# Code fence markers, as the body scanner (notes.iter_body_lines) toggles on them.
+FENCES = ("```", "~~~")
 # `--body` goes under its own heading, so it never counts as For-future-agents lines.
 BODY_HEADING = "Notes"
 
@@ -178,6 +180,10 @@ def create(
         raise ScaffoldError("--body must not contain level-2 headings")
     if HEADING_RE.match(one_line(summary)):
         raise ScaffoldError("--summary must not be a heading")
+    if one_line(summary).startswith(FENCES):
+        raise ScaffoldError("--summary must not start a code fence")
+    if sum(1 for line in _body_lines(body) if line.lstrip().startswith(FENCES)) % 2:
+        raise ScaffoldError("--body has an unclosed code fence")
     agent = agent or author
     links, tags = list(links), list(tags)
     for _ in range(CREATE_ATTEMPTS):

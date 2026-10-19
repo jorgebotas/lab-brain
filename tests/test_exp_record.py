@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from datetime import date
 from pathlib import Path
@@ -521,3 +522,100 @@ def test_exponent_metrics_read_back_as_floats(
     assert code == 0, err
     [metric] = parse_note(Path(out.strip()), runs_vault).data["metrics"]
     assert metric["value"] == 1e-07 and isinstance(metric["value"], float)
+
+
+@pytest.mark.parametrize(
+    ("flag", "value", "message"),
+    [
+        ("--hypothesis", "## Results", "--hypothesis must not be a heading"),
+        ("--hypothesis", "```", "--hypothesis must not start a code fence"),
+        ("--summary", "~~~ x", "--summary must not start a code fence"),
+    ],
+)
+def test_hypothesis_and_summary_cannot_break_the_sections(
+    runs_vault: Path, capsys: pytest.CaptureFixture[str], flag: str, value: str, message: str
+) -> None:
+    code, _, err = record(capsys, "run-c1", "--author", "claude", "--title", "Odd", flag, value)
+    assert code == 2 and err == f"labbrain: {message}\n"
+    assert new_experiments(runs_vault) == []
+
+
+def test_into_a_note_that_is_not_utf8(runs_vault: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    planned = planned_note(capsys, "Latin plan")
+    planned.write_bytes(planned.read_bytes().replace(b"## Setup\n", b"## Setup\n\ncaf\xe9\n"))
+    assert run(capsys, "validate", str(planned))[0] == 0
+    before = planned.read_bytes()
+    code, _, err = record(capsys, "run-c1", "--author", "claude", "--into", planned.stem)
+    assert code == 2 and err == f"labbrain: {planned.stem}: note is not valid UTF-8\n"
+    assert planned.read_bytes() == before
+
+
+def test_into_accepts_headings_the_parser_accepts(
+    runs_vault: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    planned = planned_note(capsys, "Odd headings")
+    text = planned.read_text().replace("## Setup\n", "## Setup ##\n")
+    planned.write_text(text.replace("## Results\n", "##\tResults\n"))
+    code, _, err = record(capsys, "run-c1", "--author", "claude", "--into", planned.stem)
+    assert code == 0, err
+    text = planned.read_text()
+    assert text.index("## Setup ##") < text.index("Runs: run-c1.") < text.index("##\tResults")
+    assert text.index("##\tResults") < text.index("| metric | value |")
+
+
+def test_generated_blocks_are_marked(runs_vault: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from labbrain.index import summary
+
+    code, out, _ = record(capsys, "run-c1", "--author", "alice", "--title", "Marked")
+    assert code == 0
+    path = Path(out.strip())
+    text = path.read_text()
+    assert (
+        "## Setup\n\n<!-- labbrain:setup -->\n\nRuns: run-c1.\n\n<!-- /labbrain:setup -->\n" in text
+    )
+    assert "## Results\n\n<!-- labbrain:results -->\n\n| metric | value |" in text
+    assert "| run-c1 |\n\n<!-- /labbrain:results -->\n\n## Interpretation\n" in text
+    assert summary(parse_note(path, runs_vault)) == "Runs: run-c1."
+    assert run(capsys, "validate", str(path))[0] == 0
+    _, out, _ = run(capsys, "lint", "--format", "json")
+    mine = [f["rule"] for f in json.loads(out)["findings"] if f["path"].endswith(path.name)]
+    assert mine == ["orphan"]  # nothing links to a fresh note yet; the markers add nothing
+
+
+def test_refilling_a_running_note_replaces_its_blocks(
+    runs_vault: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, out, _ = run(capsys, "new", "experiment", "--title", "Refill", "--author", "alice")
+    planned = Path(out.strip())
+    planned.write_text(planned.read_text().replace("## Setup\n", "## Setup\n\nPlanned prose.\n"))
+    code, _, err = record(capsys, "run-nometrics", "--author", "alice", "--into", planned.stem)
+    assert code == 0, err
+    assert parse_note(planned, runs_vault).data["status"] == "running"
+    assert "No headline metrics recorded." in planned.read_text()
+    code, _, err = record(capsys, "run-c1", "--author", "alice", "--into", planned.stem)
+    assert code == 0, err
+    text = planned.read_text()
+    assert (
+        text.count("<!-- labbrain:setup -->") == 1 and text.count("<!-- labbrain:results -->") == 1
+    )
+    assert "run-nometrics" not in text and "No headline metrics recorded." not in text
+    assert text.index("Planned prose.") < text.index("Runs: run-c1.") < text.index("## Results")
+    assert "| test.auroc | 0.85 | test | run-c1 |" in text
+    assert run(capsys, "validate", str(planned))[0] == 0
+
+
+def test_an_unclosed_marker_is_refused(
+    runs_vault: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    planned = planned_note(capsys, "Half marked")
+    planned.write_text(
+        planned.read_text().replace("## Setup\n", "## Setup\n\n<!-- labbrain:setup -->\n\nMine.\n")
+    )
+    before = planned.read_bytes()
+    code, _, err = record(capsys, "run-c1", "--author", "claude", "--into", planned.stem)
+    assert code == 2
+    assert (
+        err
+        == f"labbrain: {planned.stem}: the ## Setup section has an unclosed labbrain:setup marker\n"
+    )
+    assert planned.read_bytes() == before

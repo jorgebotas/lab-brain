@@ -1,0 +1,6 @@
+{
+  "name": "lab-brain",
+  "description": "Single-plugin marketplace for the lab-brain engine.",
+  "owner": { "name": "jorgebotas" },
+  "plugins": [{ "name": "lab-brain", "source": "./" }]
+}

@@ -2,6 +2,33 @@
 
 All notable changes to this project are documented here. Versions follow semantic versioning.
 
+## 0.2.0 (unreleased)
+
+### Added
+
+- Claude Code plugin: `.claude-plugin/plugin.json`, a single-plugin `marketplace.json`, and
+  six skills (`brain-core`, `idea`, `exp-log`, `decide`, `handoff`, `brief`) that run the
+  bundled engine through `uvx`.
+- `labbrain tracker fetch` and `tracker diff`, with a `local` adapter that refuses any run
+  path inside `data_paths`.
+- `labbrain exp record`: experiment notes from runs, with stamped headline metrics, a config
+  diff against a parent, and a gate requiring a protocol and a dataset for finished runs.
+- `labbrain finish` and `--finish` on `new` and `exp record`: validate, then sync, index and
+  log in one step.
+- `labbrain code sha`, `labbrain brief` (and `--short`), and `--summary`, `--body`, `--tag`
+  and `--status` on `new`.
+- `dataset_key` config option (default `data.dataset`).
+- Opt-in headless smoke tests (`pytest -m smoke`), `scripts/m4-gate.sh`, and
+  `claude plugin validate` in CI.
+
+### Changed
+
+- New notes are created exclusively, so two writers can never overwrite each other's note.
+- `new --body` text goes under its own `## Notes` heading, so it never counts toward the
+  three-line For-future-agents block; a body with a level-2 heading is refused.
+- The `local` adapter's data-path guard also compares file identity, so a differently-cased
+  path on a case-insensitive filesystem cannot reach a protected data path.
+
 ## 0.1.0 (2026-10-16)
 
 ### Added

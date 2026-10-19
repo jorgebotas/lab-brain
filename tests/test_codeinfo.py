@@ -84,3 +84,40 @@ def test_cli_without_a_repo(tmp_path: Path, capsys: pytest.CaptureFixture[str]) 
     vault = make_vault(tmp_path / "v")
     assert main(["--vault", str(vault), "code", "sha"]) == 2
     assert capsys.readouterr().err == "labbrain: code repo not set\n"
+
+
+def test_a_mis_cased_vault_path_is_still_excluded(tmp_path: Path) -> None:
+    (tmp_path / "case").mkdir()
+    if not (tmp_path / "CASE").exists():
+        pytest.skip("needs a case-insensitive filesystem")
+    repo = code_repo(tmp_path / "code")
+    vault = make_vault(repo / "brain")
+    commit_all(repo)
+    write(vault, "ideas/inbox/IDEA-20261015-x.md", "x\n")
+    assert code_sha(repo, exclude=repo / "BRAIN").dirty is False
+
+
+def test_the_vault_exclusion_is_not_a_glob(tmp_path: Path) -> None:
+    repo = code_repo(tmp_path / "code")
+    vault = make_vault(repo / "v*")
+    commit_all(repo)
+    write(vault, "ideas/inbox/IDEA-20261015-x.md", "x\n")
+    assert code_sha(repo, exclude=vault).dirty is False
+    write(repo, "validation/check.py", "x = 1\n")
+    assert code_sha(repo, exclude=vault).dirty is True
+
+
+def test_a_vault_at_the_repo_root_excludes_nothing(tmp_path: Path) -> None:
+    repo = code_repo(tmp_path / "code")
+    make_vault(repo)
+    commit_all(repo)
+    assert code_sha(repo, exclude=repo).dirty is False
+    write(repo, "ideas/inbox/IDEA-20261015-x.md", "x\n")
+    assert code_sha(repo, exclude=repo).dirty is True
+
+
+def test_a_vault_in_another_repository_excludes_nothing(tmp_path: Path) -> None:
+    repo = code_repo(tmp_path / "code")
+    other = code_repo(tmp_path / "notes")
+    write(repo, "new.py", "x = 1\n")
+    assert code_sha(repo, exclude=other).dirty is True

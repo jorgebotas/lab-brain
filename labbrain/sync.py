@@ -29,15 +29,19 @@ def _with_article(word: str) -> str:
     return f"{'an' if word[:1] in 'aeiou' else 'a'} {word}"
 
 
-# Statuses in which a note does not yet take effect: a proposed decision or a planned
-# experiment that sets `supersedes` supersedes nothing until its status moves on and
-# sync runs again.
-NOT_IN_FORCE: dict[str, str] = {"decision": "proposed", "experiment": "planned"}
+# The statuses in which a decision or an experiment is in force: one that sets
+# `supersedes` supersedes nothing until it is accepted (decision) or done (experiment)
+# and sync runs again. A successor since superseded itself stays in force, so sync never
+# undoes the supersession it made. Other types are in force in every status.
+IN_FORCE: dict[str, frozenset[str]] = {
+    "decision": frozenset({"accepted", "superseded"}),
+    "experiment": frozenset({"done", "superseded"}),
+}
 
 
 def _in_force(note: Note) -> bool:
-    pending = NOT_IN_FORCE.get(note.type or "")
-    return pending is None or note.get_str("status") != pending
+    statuses = IN_FORCE.get(note.type or "")
+    return statuses is None or note.get_str("status") in statuses
 
 
 @dataclass(frozen=True)

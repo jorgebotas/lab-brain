@@ -272,7 +272,9 @@ def test_a_note_that_is_not_utf8_is_reported_without_its_bytes(tmp_path: Path) -
     ("note_type", "folder", "prefix", "pending", "in_force", "old_status"),
     [
         ("decision", "decisions", "ADR", "proposed", "accepted", "accepted"),
-        ("experiment", "experiments", "EXP", "planned", "running", "done"),
+        ("experiment", "experiments", "EXP", "planned", "done", "done"),
+        ("experiment", "experiments", "EXP", "running", "done", "done"),
+        ("experiment", "experiments", "EXP", "failed", "done", "done"),
     ],
 )
 def test_a_successor_supersedes_only_once_in_force(
@@ -291,12 +293,37 @@ def test_a_successor_supersedes_only_once_in_force(
     new_path = write(
         root,
         f"{folder}/{new_id}.md",
-        note_text(new_id, note_type, status=pending, supersedes=old_id),
+        note_text(new_id, note_type, status=pending, supersedes=old_id, **extra),
     )
     assert plan(Vault.load(root)) == ([], [])
-    new_path.write_text(note_text(new_id, note_type, status=in_force, supersedes=old_id))
+    new_path.write_text(note_text(new_id, note_type, status=in_force, supersedes=old_id, **extra))
     changes, conflicts = plan(Vault.load(root))
     assert conflicts == []
     assert [(c.note_id, c.updates) for c in changes] == [
         (old_id, {"status": "superseded", "superseded_by": new_id})
+    ]
+
+
+def test_a_superseded_successor_still_counts_as_in_force(tmp_path: Path) -> None:
+    """A successor later superseded itself keeps its own supersession: sync never undoes it."""
+    root = make_vault(tmp_path)
+    write(
+        root,
+        "decisions/ADR-20261001-a.md",
+        note_text("ADR-20261001-a", "decision", status="accepted"),
+    )
+    write(
+        root,
+        "decisions/ADR-20261002-b.md",
+        note_text(
+            "ADR-20261002-b",
+            "decision",
+            status="superseded",
+            supersedes="ADR-20261001-a",
+            superseded_by="ADR-20261003-c",
+        ),
+    )
+    changes, _ = plan(Vault.load(root))
+    assert [(c.note_id, c.updates) for c in changes] == [
+        ("ADR-20261001-a", {"status": "superseded", "superseded_by": "ADR-20261002-b"})
     ]

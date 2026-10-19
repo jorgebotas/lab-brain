@@ -365,6 +365,19 @@ def cmd_finish(args: argparse.Namespace) -> int:
     return _finish(args, args.paths, args.log, args.author or os.environ.get("LABBRAIN_AUTHOR"))
 
 
+def cmd_brief(args: argparse.Namespace) -> int:
+    from labbrain import lint
+    from labbrain.brief import build_brief
+    from labbrain.vault import Vault, load_config, version_warning
+
+    root = _root(args)
+    config = load_config(root)  # no stderr warning: the brief prints it once itself
+    vault = Vault.load(root, config)
+    text = build_brief(vault, lint.run(vault), short=args.short, warning=version_warning(config))
+    print(text, end="")
+    return EXIT_OK
+
+
 # --- parser -----------------------------------------------------------------------
 
 
@@ -484,6 +497,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--log", required=True, help="text for today's log")
     p.add_argument("--author")
     p.set_defaults(func=cmd_finish)
+
+    p = add("brief", "print where the project stands")
+    p.add_argument("--short", action="store_true", help="at most four lines (SessionStart hook)")
+    p.set_defaults(func=cmd_brief)
     return parser
 
 

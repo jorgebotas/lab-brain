@@ -462,21 +462,20 @@ def _exclusive_write(path: Path, text: str, mode: int) -> None:
         raise
 
 
-def update_frontmatter(path: Path, updates: Mapping[str, Any]) -> bool:
-    """Set top-level frontmatter keys in place. Returns True if the file changed.
+def update_frontmatter_text(text: str, updates: Mapping[str, Any], *, name: str) -> str | None:
+    """`text` with top-level frontmatter keys set, or None if nothing changed.
 
-    Line endings, sequence indentation, key order, comments and quoting are kept, so
+    Line endings, a BOM, sequence indentation, key order, comments and quoting are kept, so
     changing one scalar touches only that key's lines (a block value spans several).
     Written strings that YAML 1.1 would not read as strings are single-quoted; values
-    already in the file are written back unchanged. Errors name only the file and a line.
+    already in the file are written back unchanged. Errors (ValueError) name only `name`
+    (the file) and a line.
     """
-    with open(path, encoding="utf-8", newline="") as handle:
-        text = handle.read()
     bom = BOM if text.startswith(BOM) else ""
     text = text.removeprefix(BOM)
     match = _FM_RE.match(text)
     if match is None:
-        raise ValueError(f"{path.name} has no frontmatter to update")
+        raise ValueError(f"{name} has no frontmatter to update")
     crlf = text[: match.start("fm")].endswith("\r\n")
     frontmatter = match.group("fm").replace("\r\n", "\n")
     yaml = rt_yaml(seq_offset=_detect_seq_offset(frontmatter))
@@ -487,7 +486,7 @@ def update_frontmatter(path: Path, updates: Mapping[str, Any]) -> bool:
             data = yaml.load(frontmatter) or CommentedMap()
         except RuamelYAMLError as exc:
             line = _yaml_error_line(exc)
-            message = f"{path.name}: frontmatter cannot be updated (line {line})"
+            message = f"{name}: frontmatter cannot be updated (line {line})"
             raise ValueError(message) from None
         changed = False
         for key, value in updates.items():
@@ -496,11 +495,24 @@ def update_frontmatter(path: Path, updates: Mapping[str, Any]) -> bool:
             data[key] = _yaml11_safe(value)
             changed = True
         if not changed:
-            return False
+            return None
         buffer = io.StringIO()
         yaml.dump(data, buffer)
     dumped = buffer.getvalue()
     if crlf:
         dumped = dumped.replace("\n", "\r\n")
-    atomic_write(path, bom + text[: match.start("fm")] + dumped + text[match.end("fm") :])
+    return bom + text[: match.start("fm")] + dumped + text[match.end("fm") :]
+
+
+def update_frontmatter(path: Path, updates: Mapping[str, Any]) -> bool:
+    """Set top-level frontmatter keys in place. Returns True if the file changed.
+
+    See `update_frontmatter_text`; the file is rewritten atomically, and only on a change.
+    """
+    with open(path, encoding="utf-8", newline="") as handle:
+        text = handle.read()
+    updated = update_frontmatter_text(text, updates, name=path.name)
+    if updated is None:
+        return False
+    atomic_write(path, updated)
     return True

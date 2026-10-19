@@ -14,8 +14,8 @@ from ruamel.yaml.comments import CommentedMap
 
 from labbrain.confighash import is_ignored
 from labbrain.errors import EngineError
-from labbrain.findings import display_id
-from labbrain.notes import Note, atomic_write, split_frontmatter, update_frontmatter
+from labbrain.findings import display_id, strip_controls
+from labbrain.notes import Note, atomic_write, split_frontmatter, update_frontmatter_text
 from labbrain.schema import ExperimentNote
 from labbrain.trackers.base import RunRecord, TrackerAdapter
 from labbrain.vault import Config, Vault, resolve_config_path
@@ -213,7 +213,8 @@ def _fillable(vault: Vault, note_id: str) -> Note:
     status = note.get_str("status")
     if status not in FILLABLE:
         raise RecordError(
-            f"{note_id} is {_status_label(status)}; only planned or running experiments can be filled in"
+            f"{display_id(note_id, vault.notes)} is {_status_label(status)};"
+            " only planned or running experiments can be filled in"
         )
     return note
 
@@ -302,14 +303,20 @@ def append_to_section(text: str, heading: str, block: str) -> str:
     return "".join(head + insertion + tail)
 
 
-def _fill(note: Note, fields: dict[str, Any], links: list[str], setup: str, results: str) -> Path:
+def _fill(
+    note: Note, label: str, fields: dict[str, Any], links: list[str], setup: str, results: str
+) -> Path:
+    """Append Setup/Results and update the frontmatter of `note` in one atomic write."""
     merged = list(dict.fromkeys([*note.get_list("links"), *links]))
     with open(note.path, encoding="utf-8", newline="") as handle:
         text = handle.read()
     text = append_to_section(text, "Setup", setup)
     text = append_to_section(text, "Results", results)
-    atomic_write(note.path, text)
-    update_frontmatter(note.path, {**fields, "links": merged})
+    try:
+        updated = update_frontmatter_text(text, {**fields, "links": merged}, name=note.path.name)
+    except ValueError:
+        raise RecordError(f"{label}: frontmatter cannot be updated") from None
+    atomic_write(note.path, updated if updated is not None else text)
     return note.path
 
 
@@ -345,7 +352,10 @@ def record(
     status = run_status(r["status"] for r in records)
     missing = [w for w, v in (("protocol", protocol), ("dataset", dataset)) if not v]
     if status == "done" and missing:
-        keys = {"protocol": config.protocol_key, "dataset": config.dataset_key}
+        keys = {
+            "protocol": strip_controls(config.protocol_key),
+            "dataset": strip_controls(config.dataset_key),
+        }
         raise RecordError(
             f"{' and '.join(missing)} required to record finished runs: "
             f"pass {'/'.join('--' + w for w in missing)} "
@@ -380,7 +390,8 @@ def record(
     results = render_results(metrics)
     links = list(dict.fromkeys(i for i in [req.parent, *req.links] if i))
     if target is not None:
-        return _fill(target, fields, links, setup, results)
+        label = display_id(req.into or "", vault.notes)
+        return _fill(target, label, fields, links, setup, results)
     return create(
         root,
         config,

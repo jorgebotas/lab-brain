@@ -213,6 +213,15 @@ def test_runs_disagree_on_protocol(runs_vault: Path, capsys: pytest.CaptureFixtu
     assert code == 0
 
 
+def test_runs_disagree_on_dataset(runs_vault: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    variant(runs_vault, "run-d2")
+    cfg = runs_vault / "runs" / "run-d2" / "config.yaml"
+    cfg.write_text(cfg.read_text().replace("DS-20260801-main-split", "DS-20260802-other-split"))
+    code, _, err = record(capsys, "run-c1", "run-d2", "--author", "claude", "--title", "Mixed data")
+    assert code == 2 and err == "labbrain: runs disagree on dataset; pass --dataset\n"
+    assert new_experiments(runs_vault) == []
+
+
 @pytest.mark.parametrize(
     ("run_id", "status"), [("run-failed", "failed"), ("run-nometrics", "running")]
 )
@@ -319,11 +328,67 @@ def test_into_fills_a_planned_note(runs_vault: Path, capsys: pytest.CaptureFixtu
 
 
 def test_into_refuses_finished_notes(runs_vault: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    done = runs_vault / "experiments" / "EXP-20260901-baseline.md"
+    before = done.read_bytes()
     code, _, err = record(capsys, "run-c1", "--author", "claude", "--into", "EXP-20260901-baseline")
     assert code == 2
     assert err == (
         "labbrain: EXP-20260901-baseline is done; only planned or running experiments can be filled in\n"
     )
+    assert done.read_bytes() == before
+
+
+def planned_note(capsys: pytest.CaptureFixture[str], title: str) -> Path:
+    _, out, _ = run(capsys, "new", "experiment", "--title", title, "--author", "claude")
+    return Path(out.strip())
+
+
+def test_into_frontmatter_failure_writes_nothing(
+    runs_vault: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import labbrain.experiments as experiments
+
+    planned = planned_note(capsys, "Atomic fill")
+    before = planned.read_bytes()
+    real = experiments.update_frontmatter_text
+
+    def broken(*args: object, **kwargs: object) -> str | None:
+        raise ValueError("Atomic fill: frontmatter cannot be updated (line 3)")
+
+    monkeypatch.setattr(experiments, "update_frontmatter_text", broken)
+    code, _, err = record(capsys, "run-c1", "--author", "claude", "--into", planned.stem)
+    assert code == 2
+    assert err == f"labbrain: {planned.stem}: frontmatter cannot be updated\n"
+    assert planned.read_bytes() == before
+    monkeypatch.setattr(experiments, "update_frontmatter_text", real)
+    code, _, err = record(capsys, "run-c1", "--author", "claude", "--into", planned.stem)
+    assert code == 0, err
+    text = planned.read_text()
+    assert text.count("Runs: run-c1.") == 1 and text.count("| metric | value |") == 1
+    assert parse_note(planned, runs_vault).data["status"] == "done"
+
+
+def test_into_prefers_the_planned_protocol(
+    runs_vault: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    planned = planned_note(capsys, "Planned on v1")
+    update_frontmatter(planned, {"protocol": "EVAL-v1", "dataset": "DS-20260801-main-split"})
+    code, _, err = record(capsys, "run-c1", "--author", "claude", "--into", planned.stem)
+    assert code == 0, err
+    data = parse_note(planned, runs_vault).data
+    assert data["protocol"] == "EVAL-v1" and data["dataset"] == "DS-20260801-main-split"
+
+
+def test_into_keeps_existing_links_first(
+    runs_vault: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    planned = planned_note(capsys, "Linked plan")
+    update_frontmatter(planned, {"links": ["EXP-20260901-baseline"]})
+    code, _, err = record(
+        capsys, "run-c1", "--author", "claude", "--into", planned.stem, "--parent", PARENT
+    )
+    assert code == 0, err
+    assert parse_note(planned, runs_vault).data["links"] == ["EXP-20260901-baseline", PARENT]
 
 
 def test_into_unknown_note(runs_vault: Path, capsys: pytest.CaptureFixture[str]) -> None:

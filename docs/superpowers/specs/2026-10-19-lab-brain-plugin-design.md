@@ -381,8 +381,8 @@ Exits 0 even when lint has errors; it only reports them.
 
 | Flag | Effect |
 | --- | --- |
-| `--summary TEXT` | Collapsed to one line. Replaces the For-future-agents placeholder for agent authors. For human authors it is ignored, with a stderr note. |
-| `--body TEXT` | Inserted after the For-future-agents block and before the required section headings. A trailing newline is added. Exit 2 if any line starts with `## `. |
+| `--summary TEXT` | Collapsed to one line. Replaces the For-future-agents placeholder for agent authors; exit 2 if it reads as a heading (`notes.HEADING_RE`). For human authors it is ignored, with a stderr note. |
+| `--body TEXT` | Placed under its own `## Notes` heading, after the For-future-agents block and before the required section headings, so it never counts as part of that block. Control characters are stripped. Exit 2 if any line is a level-2 heading (`notes.H2_RE`). |
 | `--tag TAG` (repeatable) | Fills `tags`, deduplicated, in order given. |
 | `--status STATUS` | Only statuses whose skeleton validates: experiment `planned`/`running`, decision `proposed`/`accepted`, otherwise the type's default. Exit 2 (`UsageError`) for anything else. |
 | `--finish TEXT` | See 4.7. |
@@ -392,6 +392,7 @@ Exits 0 even when lint has errors; it only reports them.
 - `notes.atomic_create(path, text)` writes a temp file and links it into place with `os.link`, which fails if the target exists, then removes the temp file.
 - `scaffold.create` (and `exp record`) retry ID minting up to 5 times on `FileExistsError`. New-ID minting already avoids existing files, so the retry picks the next free ID.
 - This stops two handoffs minted in the same minute (for example by parallel subagents) from overwriting each other.
+- On filesystems without hard links (`EPERM`, `ENOTSUP`, `EXDEV`, `EMLINK`, `ENOSYS`), `atomic_create` falls back to an exclusive `open(O_CREAT | O_EXCL)`, which still never replaces a file.
 
 ## 5. Skills
 

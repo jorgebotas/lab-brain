@@ -24,8 +24,8 @@ The parent spec asks for a single-plugin marketplace in the engine repo. Skills 
 - Skills are in `skills/<name>/SKILL.md`; there is no `commands/` and no `bin/`.
 - Every skill runs the engine as `uvx --from "${CLAUDE_PLUGIN_ROOT}" labbrain`. It pre-approves that string in `allowed-tools`, both quoted and unquoted, because permission rules match the command text.
 - Skills never assign shell variables or use command substitution, because allow rules do not match past an assignment.
-- User text is single-quoted.
-- `[tool.uv] cache-keys` lists `pyproject.toml` and `labbrain/**/*.py`, because without it `uvx --from <checkout>` serves a stale build; this was verified with uv 0.7.17.
+- User text is single-quoted and attached to its option with `=` (`--title='<title>'`), so a value starting with `-` is not read as a flag.
+- `[tool.uv] cache-keys` lists `pyproject.toml` and `labbrain/**/*.py`, so `uvx --from <checkout>` rebuilds after a source change. Only newer uv honours this for `uvx --from`: an audit saw stale builds on uv 0.7-0.10. The smoke harness and `scripts/m4-gate.sh` therefore set `UV_NO_CACHE=1`, and the README tells local-checkout users to do the same or use uv 0.11 or newer. Installed plugins are unaffected, because each version builds its own engine.
 
 ## Alternatives considered
 

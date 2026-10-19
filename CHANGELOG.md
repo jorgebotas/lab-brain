@@ -27,6 +27,25 @@ All notable changes to this project are documented here. Versions follow semanti
 ### Changed
 
 - New notes are created exclusively, so two writers can never overwrite each other's note.
+- `sync` lets a `proposed` decision or a `planned` experiment supersede its target only once it
+  is accepted or done.
+- `exp record --into` replaces the Setup and Results blocks it wrote earlier (marked
+  `<!-- labbrain:setup -->` and `<!-- labbrain:results -->`) instead of appending a second copy,
+  so a running experiment can be recorded again when its runs finish.
+- Skills attach quoted values to their options with `=` (`--title='<title>'`), so a value
+  starting with `-` is no longer read as a flag.
+- The smoke harness and `scripts/m4-gate.sh` set `UV_NO_CACHE=1`, because uv 0.7-0.10 may serve
+  a stale `uvx --from <checkout>` build despite `cache-keys`.
+
+### Fixed
+
+- With `protected_data` on, `new` and `exp record` refuse (exit 2) note text that matches a
+  protected-data pattern, before writing anything.
+- Refused with exit 2 instead of writing a broken note: a `--summary` that starts with a code
+  fence, a `--body` with unbalanced code fences, a heading-like `--hypothesis`, and duplicate
+  run IDs.
+- Floats are written in a form that YAML 1.1 parsers also read as floats.
+- A malformed run file is reported as an error instead of crashing the command.
 
 ## 0.1.0 (2026-10-16)
 

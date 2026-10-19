@@ -117,6 +117,28 @@ def test_finish_refuses_empty_log_text(vault_dir: Path, capsys: pytest.CaptureFi
     assert code == 2 and "--log" in err
 
 
+def test_finish_refuses_control_only_log_text_before_writing(
+    vault_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    note = vault_dir / "ideas" / "inbox" / "IDEA-20261010-smoothing-schedule.md"
+    (vault_dir / "index.md").write_text("stale\n")
+    code, _, err = run(capsys, "finish", str(note), "--log", "\x07\x1b\x7f")
+    assert code == 2 and err == "labbrain: --log text is empty\n"
+    assert (vault_dir / "index.md").read_text() == "stale\n"
+    assert not (vault_dir / LOG).exists()
+
+
+def test_new_with_empty_finish_text_is_refused(
+    vault_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, err = run(
+        capsys, "new", "idea", "--title", "Empty log", "--author", "claude", "--finish", ""
+    )
+    assert code == 2 and err == "labbrain: --log text is empty\n"
+    assert Path(out.strip()).is_file()
+    assert "IDEA-20261015-empty-log" not in (vault_dir / "index.md").read_text()
+
+
 def test_sync_command_output_is_unchanged(
     vault_dir: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

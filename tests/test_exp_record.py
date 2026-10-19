@@ -403,6 +403,42 @@ def test_title_and_into_are_exclusive(runs_vault: Path) -> None:
         assert info.value.code == 2
 
 
+@pytest.mark.parametrize("title", ["", "   "])
+def test_blank_title_is_refused(
+    runs_vault: Path, capsys: pytest.CaptureFixture[str], title: str
+) -> None:
+    code, _, err = record(capsys, "run-c1", "--author", "claude", "--title", title)
+    assert code == 2 and err == "labbrain: --title is required\n"
+    assert list((runs_vault / "experiments").glob("EXP-20261015-*.md")) == []
+
+
+def test_exhausted_ids_are_a_usage_error(
+    runs_vault: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import labbrain.scaffold as scaffold
+
+    def always_taken(path: Path, text: str) -> None:
+        raise FileExistsError(path)
+
+    monkeypatch.setattr(scaffold, "atomic_create", always_taken)
+    code, _, err = record(capsys, "run-c1", "--author", "claude", "--title", "Crowded")
+    assert code == 2 and err.startswith("labbrain: could not create")
+    assert "internal error" not in err
+
+
+@pytest.mark.parametrize("text", ["", "\x07\x1b"])
+def test_record_with_unusable_finish_text_is_refused(
+    runs_vault: Path, capsys: pytest.CaptureFixture[str], text: str
+) -> None:
+    index_before = (runs_vault / "index.md").read_bytes()
+    code, out, err = record(
+        capsys, "run-c1", "--author", "claude", "--title", "Odd log", "--finish", text
+    )
+    assert code == 2 and err == "labbrain: --log text is empty\n"
+    assert Path(out.strip()).is_file()  # the note is written; finish refused its log text
+    assert (runs_vault / "index.md").read_bytes() == index_before
+
+
 def test_record_with_finish(runs_vault: Path, capsys: pytest.CaptureFixture[str]) -> None:
     code, out, _ = record(
         capsys,

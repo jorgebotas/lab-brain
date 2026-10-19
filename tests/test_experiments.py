@@ -117,6 +117,21 @@ def test_parent_run_ids(vault_dir: Path) -> None:
         parent_run_ids(Vault.load(vault_dir), "EXP-20261015-planned")
 
 
+def test_parent_without_run_ids_goes_through_display_id(
+    vault_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import labbrain.experiments as experiments
+
+    write(
+        vault_dir,
+        "experiments/EXP-20261015-planned.md",
+        note_text("EXP-20261015-planned", "experiment"),
+    )
+    monkeypatch.setattr(experiments, "display_id", lambda target, known=None: "<shown>")
+    with pytest.raises(RecordError, match="^parent <shown> has no run ids$"):
+        parent_run_ids(Vault.load(vault_dir), "EXP-20261015-planned")
+
+
 def test_unknown_parent_ids_are_not_echoed(vault_dir: Path) -> None:
     with pytest.raises(RecordError) as info:
         parent_run_ids(Vault.load(vault_dir), "Jane Doe 48151623")

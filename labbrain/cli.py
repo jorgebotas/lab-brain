@@ -185,7 +185,7 @@ def cmd_new(args: argparse.Namespace) -> int:
     except IdError as exc:
         raise UsageError(str(exc)) from exc
     print(path)
-    if args.finish:
+    if args.finish is not None:
         return _finish(args, [path], args.finish, author)
     return EXIT_OK
 
@@ -419,7 +419,10 @@ def cmd_tracker_diff(args: argparse.Namespace) -> int:
 
 def cmd_exp_record(args: argparse.Namespace) -> int:
     from labbrain.experiments import RecordRequest, record
+    from labbrain.ids import IdError
 
+    if args.title is not None and not args.title.strip():
+        raise UsageError("--title is required")
     author = _author(args)
     root, config = _config(args)
     request = RecordRequest(
@@ -435,9 +438,12 @@ def cmd_exp_record(args: argparse.Namespace) -> int:
         summary=args.summary,
         links=args.link,
     )
-    path = record(root, config, request)
+    try:
+        path = record(root, config, request)
+    except IdError as exc:
+        raise UsageError(str(exc)) from exc
     print(path)
-    if args.finish:
+    if args.finish is not None:
         return _finish(args, [path], args.finish, author)
     return EXIT_OK
 
@@ -496,7 +502,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--body", default="", help="text placed before the required sections")
     p.add_argument("--tag", action="append", default=[], help="tag (repeatable)")
     p.add_argument("--status", default=None, help="initial status (default: the type's default)")
-    p.add_argument("--finish", default="", help="then run `finish` with this log text")
+    p.add_argument("--finish", default=None, help="then run `finish` with this log text")
     p.set_defaults(func=cmd_new)
 
     p = add("validate", "check single files (used by the write hook)")
@@ -601,7 +607,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--summary", default="", help="one line for the For-future-agents block")
     p.add_argument("--link", action="append", default=[], help="ID to put in `links` (repeatable)")
     p.add_argument("--at", default=None, help="ISO datetime to use instead of now")
-    p.add_argument("--finish", default="", help="then run `finish` with this log text")
+    p.add_argument("--finish", default=None, help="then run `finish` with this log text")
     p.set_defaults(func=cmd_exp_record)
     return parser
 

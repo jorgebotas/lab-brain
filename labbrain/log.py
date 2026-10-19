@@ -14,17 +14,18 @@ from labbrain.findings import strip_controls
 from labbrain.layout import LOG_DIR
 
 
-def _one_line(text: str) -> str:
+def one_line(text: str) -> str:
+    """`text` on one line, as the log writes it: control characters and breaks become spaces."""
     return " ".join(strip_controls(text).split())
 
 
 def append(root: Path, text: str, *, when: datetime, author: str | None = None) -> Path:
     """Append one line. Control characters and line breaks in `text` and `author` become
     spaces, and brackets are dropped from `author`, so neither can forge another entry."""
-    message = _one_line(text)
+    message = one_line(text)
     if not message:
         raise ValueError("log text is empty")
-    author = _one_line(re.sub(r"[\[\]]", "", author or "")) or None
+    author = one_line(re.sub(r"[\[\]]", "", author or "")) or None
     path = root / LOG_DIR / f"{when:%Y-%m-%d}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     line = f"- {when:%H:%M}" + (f" [{author}]" if author else "") + f" {message}\n"

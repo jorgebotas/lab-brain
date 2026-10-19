@@ -38,7 +38,7 @@ def finish(
     from labbrain.validate import validate_paths
     from labbrain.vault import Vault, find_root
 
-    if not log_text.split():
+    if not log.one_line(log_text):
         raise FinishError("--log text is empty")
     targets = [Path(p).expanduser().resolve() for p in paths]
     root = find_root(start=targets[0].parent, explicit=vault)

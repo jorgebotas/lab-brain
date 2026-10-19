@@ -90,7 +90,7 @@ def parent_run_ids(vault: Vault, parent_id: str) -> list[str]:
     run_ids = tracker.get("run_ids") if isinstance(tracker, dict) else None
     ids = [r for r in run_ids if isinstance(r, str)] if isinstance(run_ids, list) else []
     if not ids:
-        raise RecordError(f"parent {parent_id} has no run ids")
+        raise RecordError(f"parent {display_id(parent_id, vault.notes)} has no run ids")
     return ids
 
 

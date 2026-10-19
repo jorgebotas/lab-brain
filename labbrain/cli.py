@@ -387,6 +387,22 @@ def cmd_tracker_fetch(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_code_sha(args: argparse.Namespace) -> int:
+    from labbrain.codeinfo import code_sha
+    from labbrain.vault import resolve_config_path
+
+    root, config = _config(args)
+    if args.repo:
+        label, path = args.repo, Path(args.repo).expanduser()
+    elif config.code_repo.strip():
+        label, path = config.code_repo, resolve_config_path(root, config.code_repo)
+    else:
+        raise UsageError("code repo not set")
+    info = code_sha(path, exclude=root)
+    print(json.dumps({"repo": label, "sha": info.sha, "dirty": info.dirty}))
+    return EXIT_OK
+
+
 # --- parser -----------------------------------------------------------------------
 
 
@@ -516,6 +532,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = tracker_sub.add_parser("fetch", help="print runs as JSON", parents=[common])
     p.add_argument("runs", nargs="+", metavar="RUN")
     p.set_defaults(func=cmd_tracker_fetch)
+
+    code = add("code", "code repository commands")
+    code_sub = code.add_subparsers(dest="code_command", required=True)
+    p = code_sub.add_parser(
+        "sha", help="print the code repo's commit and dirty flag", parents=[common]
+    )
+    p.add_argument("--repo", help="code repository (default: code_repo from config)")
+    p.set_defaults(func=cmd_code_sha)
     return parser
 
 

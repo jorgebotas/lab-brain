@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from collections.abc import Sequence
 from datetime import datetime
@@ -60,12 +61,26 @@ def _read_json(path: Path, run_id: str) -> dict[str, Any]:
     return data
 
 
+def _finite(value: Any) -> float | None:
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:  # an integer too large for a float
+        return None
+    return number if math.isfinite(number) else None
+
+
 def _numbers(flat: dict[str, Any]) -> dict[str, float]:
-    return {
-        key: float(value)
-        for key, value in flat.items()
-        if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
-    }
+    return {key: number for key, value in flat.items() if (number := _finite(value)) is not None}
+
+
+def _identity(path: Path) -> tuple[int, int] | None:
+    try:
+        st = os.stat(path)
+    except (OSError, ValueError):
+        return None
+    return (st.st_dev, st.st_ino)
 
 
 def _text(value: Any) -> str | None:
@@ -98,6 +113,9 @@ class LocalAdapter:
     def __init__(self, runs_dir: Path, protected: Sequence[Path] = ()) -> None:
         self.runs_dir = runs_dir
         self.protected = list(protected)
+        # File identities catch a differently-cased path on a case-insensitive filesystem,
+        # where resolve() does not canonicalise letter case.
+        self._protected_ids = {i for p in self.protected if (i := _identity(p)) is not None}
 
     @classmethod
     def from_config(cls, config: Config, root: Path) -> LocalAdapter:
@@ -111,9 +129,11 @@ class LocalAdapter:
 
     def _guard(self, path: Path) -> Path:
         real = path.resolve()
-        for root in self.protected:
-            if real == root or root in real.parents:
-                raise TrackerError("run path is inside a protected data path")
+        inside = any(real == root or root in real.parents for root in self.protected)
+        if not inside and self._protected_ids:
+            inside = any(_identity(p) in self._protected_ids for p in (real, *real.parents))
+        if inside:
+            raise TrackerError("run path is inside a protected data path")
         return real
 
     def _load(self, run_id: str) -> RunRecord:

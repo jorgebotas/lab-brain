@@ -232,3 +232,55 @@ def test_tracker_fetch_cli(vault: Path, capsys: pytest.CaptureFixture[str]) -> N
 def test_tracker_fetch_cli_errors_exit_2(vault: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["--vault", str(vault), "tracker", "fetch", "run-missing"]) == 2
     assert capsys.readouterr().err == "labbrain: run run-missing: config.yaml not found\n"
+
+
+def _case_insensitive(tmp_path: Path) -> bool:
+    (tmp_path / "case").mkdir()
+    return (tmp_path / "CASE").exists()
+
+
+@pytest.mark.parametrize(
+    ("data_path", "run_id"),
+    [("runs/RUN-C1", "run-c1"), ("RUNS", "run-c1"), ("runs/run-c1", "RUN-C1")],
+)
+def test_differently_cased_paths_cannot_bypass_the_guard(
+    tmp_path: Path, data_path: str, run_id: str
+) -> None:
+    insensitive = _case_insensitive(tmp_path)
+    root = make_vault(tmp_path / "v", MIN_CONFIG + f"data_paths: ['{data_path}']\n")
+    copy_runs(root)
+    if insensitive:
+        with pytest.raises(TrackerError, match="protected data path"):
+            adapter(root).fetch([run_id])
+    elif run_id != "run-c1":
+        # Case-sensitive: the differently-cased run does not exist.
+        with pytest.raises(TrackerError, match=r"config.yaml not found$"):
+            adapter(root).fetch([run_id])
+    else:
+        # Case-sensitive: the differently-cased data path names another (absent) path.
+        assert adapter(root).fetch([run_id])[0]["run_id"] == "run-c1"
+
+
+def test_huge_integer_metrics_are_dropped(tmp_path: Path) -> None:
+    root = make_vault(tmp_path / "v")
+    huge = "1" + "0" * 399
+    add_run(root, "r1", {"config.yaml": "a: 1\n", "metrics.json": f'{{"big": {huge}, "ok": 2}}'})
+    assert adapter(root).fetch(["r1"])[0]["summary"] == {"ok": 2.0}
+
+
+def test_symlinked_file_into_a_data_path_is_refused(tmp_path: Path) -> None:
+    secret = tmp_path / "secret"
+    root = make_vault(tmp_path / "v", MIN_CONFIG + f"data_paths: ['{secret}']\n")
+    write(tmp_path, "secret/m.json", '{"m": 1}')
+    add_run(root, "r1", {"config.yaml": "a: 1\n"})
+    (root / "runs" / "r1" / "metrics.json").symlink_to(secret / "m.json")
+    with pytest.raises(TrackerError, match="protected data path"):
+        adapter(root).fetch(["r1"])
+
+
+def test_unrelated_data_paths_do_not_block_reads(tmp_path: Path) -> None:
+    (tmp_path / "elsewhere").mkdir()
+    paths = f"['{tmp_path / 'elsewhere'}', '{tmp_path / 'not-yet'}']"
+    root = make_vault(tmp_path / "v", MIN_CONFIG + f"data_paths: {paths}\n")
+    copy_runs(root)
+    assert adapter(root).fetch(["run-nometrics"])[0]["status"] == "unknown"

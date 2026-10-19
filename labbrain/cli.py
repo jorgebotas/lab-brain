@@ -477,6 +477,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("schema", "print the JSON Schema of the frontmatter models")
     p.add_argument("type", nargs="?", choices=NOTE_TYPES)
     p.set_defaults(func=cmd_schema)
+
     tracker = add("tracker", "tracker commands")
     tracker_sub = tracker.add_subparsers(dest="tracker_command", required=True)
     p = tracker_sub.add_parser("fetch", help="print runs as JSON", parents=[common])

@@ -162,7 +162,7 @@ lab-brain/
   - 2: every other failure, including tracker errors, missing notes, refused records and usage errors.
 - **Messages.** New errors become `UsageError`s, or a new `TrackerError` that `main` handles the same way. Each message is printed as `labbrain: <message>` on stderr.
 - **What messages may contain:**
-  - IDs only through `findings.display_id`;
+  - note IDs only through `findings.display_id`, and run IDs only through `findings.sanitize`;
   - statuses only through the frozen-rules `_status_label` pattern;
   - never file contents, config values or frontmatter values.
 - Titles printed by `brief` go through `findings.strip_controls`, as `list` does.
@@ -213,7 +213,7 @@ lab-brain/
 
 **Status.** A valid `meta.json` `status` wins. Otherwise a run is `finished` if `metrics.json` exists, and `unknown` if not.
 
-**Errors.** Messages carry the run ID only when it passed validation, through `display_id`:
+**Errors.** Messages carry the run ID only when it passed validation. They pass through `findings.sanitize`, which redacts identifier-like tokens; `display_id` would blank every run ID, because run IDs are not note IDs:
 
 - `run <id>: config.yaml not found`;
 - `run <id>: <file> is not valid <YAML|JSON>`;

@@ -13,15 +13,15 @@ Arguments: $ARGUMENTS
 
 Run IDs are the arguments that are not flags. `--parent EXP-ID` names the experiment these runs change. `--into EXP-ID` names a planned experiment to fill in. `--planned` means the runs do not exist yet.
 
-Pass every value from the user or the runs inside single quotes (write a `'` as `'\''`). Never use shell variables or command substitution.
+Pass free text (titles, summaries, hypotheses, names) inside single quotes (write a `'` as `'\''`). Pass IDs unquoted, exactly as the engine prints them; quote a run ID the user gave only if it holds anything but letters, digits, `.`, `_` and `-`. Never use shell variables or command substitution.
 
 ## Runs that exist
 
 1. Run `uvx --from "${CLAUDE_PLUGIN_ROOT}" labbrain tracker fetch <run-id...>`. It prints one JSON object per run, with `config`, `summary`, `status`, `tags`, `notes`, `protocol`, `dataset` and `headline`. If it exits non-zero, show the message and stop.
 2. Hypothesis: with `--into`, leave out `--hypothesis` unless the user gives a new one; the planned note already holds it, and the flag would replace it. Otherwise use one only if the runs' `notes` or `tags` state it, or ask the user. Never invent one.
-3. Protocol: use the runs' `protocol`. If it is null, ask the user, offering the IDs from `uvx --from "${CLAUDE_PLUGIN_ROOT}" labbrain list --type protocol`. Never invent one.
-4. Dataset: use the runs' `dataset`. If it is null, ask the user, offering the IDs from `uvx --from "${CLAUDE_PLUGIN_ROOT}" labbrain list --type dataset`. If none fits, say so and suggest the user create one with `uvx --from "${CLAUDE_PLUGIN_ROOT}" labbrain new dataset --title '<title>' --author '<their name>'`. Do not log until it exists.
-5. Record the experiment in one call. Leave out `--parent`, `--protocol` or `--dataset` when you have no value for them. If the user passed `--into` or names a planned experiment for these runs, pass `--into <EXP-ID>` instead of `--title`, and leave out `--hypothesis` unless the user gave a new one:
+3. Protocol: with `--into`, do not ask; leave out `--protocol` and the engine uses the planned note's protocol, then the runs'. Otherwise use the runs' `protocol`. If it is null, ask the user, offering the IDs from `uvx --from "${CLAUDE_PLUGIN_ROOT}" labbrain list --type protocol`. Never invent one.
+4. Dataset: with `--into`, do not ask; leave out `--dataset` and the engine uses the planned note's dataset, then the runs'. Otherwise use the runs' `dataset`. If it is null, ask the user, offering the IDs from `uvx --from "${CLAUDE_PLUGIN_ROOT}" labbrain list --type dataset`. If none fits, say so and suggest the user create one with `uvx --from "${CLAUDE_PLUGIN_ROOT}" labbrain new dataset --title '<title>' --author '<their name>'`. Do not log until it exists.
+5. Record the experiment in one call. Leave out `--parent`, `--protocol` or `--dataset` when you have no value for them. If the user passed `--into` or names a planned experiment for these runs, pass `--into <EXP-ID>` instead of `--title`, leave out `--summary` (it is ignored with `--into`), and leave out `--hypothesis` unless the user gave a new one:
 
    ```bash
    uvx --from "${CLAUDE_PLUGIN_ROOT}" labbrain exp record <run-id...> --author claude --title '<short title>' --summary '<one line: what this experiment is>' --hypothesis '<hypothesis>' --parent <EXP-ID> --protocol <EVAL-ID> --dataset <DS-ID> --finish 'exp-log: <short title>'
@@ -47,7 +47,7 @@ Pass every value from the user or the runs inside single quotes (write a `'` as 
 - Do not invent IDs, hypotheses, protocols, datasets or metric values.
 - Do not copy metrics by hand, or edit the `metrics`, `tracker`, `code` or `config_hash` fields.
 - Do not log each run of a group as its own note; one note covers the runs you were given.
-- Do not change a `done` experiment; a correction is a new experiment with `supersedes`.
+- Do not change an experiment that was already `done` before this session; a correction is a new experiment with `supersedes`. The note `exp record` just wrote is yours to fix (steps 6 and 7) until it is committed.
 - Do not edit `index.md`, anything under `raw/`, or a frozen note.
 - Do not paste text that `phi-scan` matched.
 - Do not write outside the vault.

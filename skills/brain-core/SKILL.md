@@ -21,7 +21,7 @@ The engine command is `uvx --from "${CLAUDE_PLUGIN_ROOT}" labbrain`. Type it in 
 | Folder | Rule |
 | --- | --- |
 | `raw/` | Never modify or delete. |
-| `experiments/` | Append-only; once done, only `status` and `superseded_by` change. |
+| `experiments/` | Append-only; once done before this session, only `status` and `superseded_by` change. The note `exp record` just wrote stays editable until it is committed. |
 | `protocols/` | A new version is a new file; a version an experiment uses is frozen. |
 | `claims/` | Editable; every edit appends a line to `## History`. |
 | `ideas/inbox/` | Create-only; consolidated ideas move to `ideas/archive/` with `git mv`. |

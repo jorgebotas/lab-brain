@@ -383,3 +383,41 @@ def test_alias_fan_out_is_walked_once_and_cycles_are_refused() -> None:
     for text in ("tags: &a [*a]\n", "a: &x {b: *x}\n"):
         with pytest.raises(UnreadableValueError):
             safe_load(text)
+
+
+def test_well_formed_is_linear_in_shared_containers() -> None:
+    """Shared anchors reached at many depths are walked once (their height is memoised)."""
+    import time
+
+    import yaml
+
+    from labbrain.notes import _StrictLoader, well_formed
+
+    n = 190
+    lines = ["l0: &l0 [x]"] + [
+        f"l{i}: &l{i} [" + ", ".join(f"*l{j}" for j in reversed(range(i))) + "]"
+        for i in range(1, n)
+    ]
+    lines.append("z: [" + ", ".join(f"*l{j}" for j in range(n)) + "]")
+    data = yaml.load("\n".join(lines), Loader=_StrictLoader)
+    started = time.perf_counter()
+    assert well_formed(data)
+    assert time.perf_counter() - started < 0.1
+
+
+def test_well_formed_depth_cap_and_cycles() -> None:
+    from labbrain.notes import MAX_DEPTH, well_formed
+
+    def nested(depth: int) -> list:
+        value: list = []
+        for _ in range(depth - 1):
+            value = [value]
+        return value
+
+    assert well_formed(nested(MAX_DEPTH))
+    assert not well_formed(nested(MAX_DEPTH + 1))
+    shared = nested(MAX_DEPTH - 1)
+    assert well_formed([shared, shared]) and not well_formed([[shared], shared])
+    loop: list = []
+    loop.append(loop)
+    assert not well_formed({"a": loop})

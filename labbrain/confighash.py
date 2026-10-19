@@ -43,11 +43,23 @@ def is_ignored(key: str, patterns: Iterable[str]) -> bool:
     return any(fnmatch.fnmatchcase(key, pattern) for pattern in patterns)
 
 
+def _json_key(key: Any) -> str:
+    """`key` as the string json.dumps would write for it (`true`, `null`, `3`, `1.5`),
+    or str() of a key JSON cannot encode (a YAML date, say)."""
+    if isinstance(key, str):
+        return key
+    if key is None or isinstance(key, bool | int | float):
+        return json.dumps(key)
+    return str(key)
+
+
 def string_keys(value: Any) -> Any:
-    """`value` with every mapping key stringified, recursively (lists and tuples become
-    lists), so JSON can encode it: YAML allows date, number or mixed-type keys."""
+    """`value` with every mapping key a string, recursively (lists and tuples become
+    lists), so JSON can encode and sort it: YAML allows date or mixed-type keys. Keys
+    JSON can encode are written as json.dumps writes them, so ordinary output is
+    unchanged."""
     if isinstance(value, Mapping):
-        return {str(key): string_keys(item) for key, item in value.items()}
+        return {_json_key(key): string_keys(item) for key, item in value.items()}
     if isinstance(value, list | tuple):
         return [string_keys(item) for item in value]
     return value

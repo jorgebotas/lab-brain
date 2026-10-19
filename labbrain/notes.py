@@ -80,38 +80,45 @@ class UnreadableValueError(yaml.YAMLError):
 MAX_DEPTH = 200
 
 
+def _children(value: Mapping[Any, Any] | list[Any] | tuple[Any, ...]) -> list[Any]:
+    return [*value.keys(), *value.values()] if isinstance(value, Mapping) else list(value)
+
+
 def well_formed(data: Any) -> bool:
     """True when loaded data nests at most MAX_DEPTH levels, has no cycle (a recursive
     YAML alias makes one), and every string in it, key or value, encodes as UTF-8 (JSON
     and YAML escapes can produce lone surrogates, which cannot be written).
 
-    The walk is iterative, and a container shared through aliases is walked again only
-    when reached deeper than before, so an alias fan-out cannot make it exponential.
+    The walk is iterative and memoises each container's height (by id), so a container
+    shared through aliases is walked once however many places reach it: linear time.
     """
-    deepest: dict[int, int] = {}  # id of a finished container -> depth it was walked at
+    heights: dict[int, int] = {}  # id of a finished container -> levels at and below it
     on_path: set[int] = set()
-    stack: list[tuple[Any, int, bool]] = [(data, 1, False)]
+    stack: list[tuple[Any, bool]] = [(data, False)]
     while stack:
-        value, depth, leaving = stack.pop()
-        if leaving:
-            on_path.discard(id(value))
-            deepest[id(value)] = max(depth, deepest.get(id(value), 0))
-            continue
+        value, leaving = stack.pop()
         if isinstance(value, str):
             try:
                 value.encode("utf-8")
             except UnicodeEncodeError:
                 return False
-        elif isinstance(value, Mapping | list | tuple):
-            key = id(value)
-            if key in on_path or depth > MAX_DEPTH:
+            continue
+        if not isinstance(value, Mapping | list | tuple):
+            continue
+        key = id(value)
+        if leaving:
+            on_path.discard(key)
+            below = [heights[id(c)] for c in _children(value) if id(c) in heights]
+            height = 1 + max(below, default=0)
+            if height > MAX_DEPTH:
                 return False
-            if deepest.get(key, 0) >= depth:
-                continue
+            heights[key] = height
+        elif key in on_path:
+            return False  # a cycle
+        elif key not in heights:
             on_path.add(key)
-            stack.append((value, depth, True))
-            items = [*value.keys(), *value.values()] if isinstance(value, Mapping) else value
-            stack.extend((item, depth + 1, False) for item in items)
+            stack.append((value, True))
+            stack.extend((child, False) for child in _children(value))
     return True
 
 

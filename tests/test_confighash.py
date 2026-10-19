@@ -107,3 +107,16 @@ def test_config_hash_cli_refuses_colliding_keys(
     err = capsys.readouterr().err
     assert err == "labbrain: run config c.yaml has keys that collide when flattened\n"
     assert "999" not in err
+
+
+def test_string_keys_renders_json_keys_as_json_does() -> None:
+    from datetime import date
+
+    from labbrain.confighash import string_keys
+
+    value = [{True: 1, None: 2, 3: 4, 1.5: 5, "s": 6, date(2026, 1, 1): 7}]
+    assert json.dumps(string_keys(value)) == (
+        '[{"true": 1, "null": 2, "3": 4, "1.5": 5, "s": 6, "2026-01-01": 7}]'
+    )
+    plain = [{True: 1, None: 2, 3: 4, 1.5: 5, "s": 6}]
+    assert json.dumps(string_keys(plain)) == json.dumps(plain)

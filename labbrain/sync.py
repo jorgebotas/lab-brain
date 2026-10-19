@@ -29,19 +29,31 @@ def _with_article(word: str) -> str:
     return f"{'an' if word[:1] in 'aeiou' else 'a'} {word}"
 
 
-# The statuses in which a decision or an experiment is in force: one that sets
+# The status in which a decision or an experiment is in force: one that sets
 # `supersedes` supersedes nothing until it is accepted (decision) or done (experiment)
-# and sync runs again. A successor since superseded itself stays in force, so sync never
-# undoes the supersession it made. Other types are in force in every status.
-IN_FORCE: dict[str, frozenset[str]] = {
-    "decision": frozenset({"accepted", "superseded"}),
-    "experiment": frozenset({"done", "superseded"}),
-}
+# and sync runs again. Other types are in force in every status.
+IN_FORCE: dict[str, str] = {"decision": "accepted", "experiment": "done"}
 
 
-def _in_force(note: Note) -> bool:
-    statuses = IN_FORCE.get(note.type or "")
-    return statuses is None or note.get_str("status") in statuses
+def _in_force(note: Note, target: Note | None) -> bool:
+    """Whether `note`'s `supersedes` takes effect on `target`.
+
+    A successor superseded since counts only for a supersession already recorded (the
+    target's superseded_by names it), so sync keeps what it did but never supersedes
+    anew through a note that was never in force: no cascade through a planned
+    experiment, no loop between two decisions, and a second sync changes nothing.
+    """
+    required = IN_FORCE.get(note.type or "")
+    if required is None:
+        return True
+    status = note.get_str("status")
+    if status == required:
+        return True
+    return (
+        status == "superseded"
+        and target is not None
+        and target.get_str("superseded_by") == note.stem
+    )
 
 
 @dataclass(frozen=True)
@@ -66,7 +78,7 @@ def plan(vault: Vault) -> tuple[list[Change], list[Conflict]]:
     successors: dict[str, list[str]] = defaultdict(list)
     for note in vault.notes.values():
         target = note.get_str("supersedes")
-        if target and _in_force(note):
+        if target and _in_force(note, vault.get(target)):
             successors[target].append(note.stem)
     for old_id in sorted(successors):
         old = vault.get(old_id)

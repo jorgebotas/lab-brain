@@ -304,13 +304,29 @@ def test_a_successor_supersedes_only_once_in_force(
     ]
 
 
-def test_a_superseded_successor_still_counts_as_in_force(tmp_path: Path) -> None:
-    """A successor later superseded itself keeps its own supersession: sync never undoes it."""
+def _sync_twice(root: Path) -> list[tuple[str, dict]]:
+    """Plan and apply sync twice; returns the second run's planned changes."""
+    for _ in range(2):
+        vault = Vault.load(root)
+        changes, _ = plan(vault)
+        apply(vault, changes, TODAY)
+    return [(c.note_id, c.updates) for c in plan(Vault.load(root))[0]]
+
+
+def _status(root: Path, rel: str) -> tuple[str | None, str | None]:
+    from labbrain.notes import parse_note
+
+    note = parse_note(root / rel, root)
+    return note.get_str("status"), note.get_str("superseded_by")
+
+
+def test_an_existing_supersession_is_kept(tmp_path: Path) -> None:
+    """A successor superseded since keeps the supersession it already made."""
     root = make_vault(tmp_path)
-    write(
+    old = write(
         root,
         "decisions/ADR-20261001-a.md",
-        note_text("ADR-20261001-a", "decision", status="accepted"),
+        note_text("ADR-20261001-a", "decision", status="accepted", superseded_by="ADR-20261002-b"),
     )
     write(
         root,
@@ -323,7 +339,52 @@ def test_a_superseded_successor_still_counts_as_in_force(tmp_path: Path) -> None
             superseded_by="ADR-20261003-c",
         ),
     )
-    changes, _ = plan(Vault.load(root))
+    changes, conflicts = plan(Vault.load(root))
+    assert conflicts == []
     assert [(c.note_id, c.updates) for c in changes] == [
-        ("ADR-20261001-a", {"status": "superseded", "superseded_by": "ADR-20261002-b"})
+        ("ADR-20261001-a", {"status": "superseded"})
     ]
+    assert _sync_twice(root) == []
+    assert _status(root, "decisions/ADR-20261001-a.md") == ("superseded", "ADR-20261002-b")
+    old.write_text(note_text("ADR-20261001-a", "decision", status="accepted"))
+    assert plan(Vault.load(root)) == ([], [])  # a superseded successor makes no new supersession
+
+
+def test_no_supersession_through_a_successor_that_never_ran(tmp_path: Path) -> None:
+    root = make_vault(tmp_path)
+    ds = {"dataset": "DS-20261001-d"}
+    write(
+        root,
+        "experiments/EXP-20261001-y.md",
+        note_text("EXP-20261001-y", "experiment", status="done", **ds),
+    )
+    write(
+        root,
+        "experiments/EXP-20261002-p.md",
+        note_text("EXP-20261002-p", "experiment", status="planned", supersedes="EXP-20261001-y"),
+    )
+    write(
+        root,
+        "experiments/EXP-20261003-q.md",
+        note_text("EXP-20261003-q", "experiment", status="done", supersedes="EXP-20261002-p", **ds),
+    )
+    assert _sync_twice(root) == []
+    assert _status(root, "experiments/EXP-20261002-p.md") == ("superseded", "EXP-20261003-q")
+    assert _status(root, "experiments/EXP-20261001-y.md") == ("done", None)
+
+
+def test_mutual_supersession_leaves_a_decision_in_force(tmp_path: Path) -> None:
+    root = make_vault(tmp_path)
+    write(
+        root,
+        "decisions/ADR-20261001-a.md",
+        note_text("ADR-20261001-a", "decision", status="accepted", supersedes="ADR-20261002-b"),
+    )
+    write(
+        root,
+        "decisions/ADR-20261002-b.md",
+        note_text("ADR-20261002-b", "decision", status="proposed", supersedes="ADR-20261001-a"),
+    )
+    assert _sync_twice(root) == []
+    assert _status(root, "decisions/ADR-20261001-a.md") == ("accepted", None)
+    assert _status(root, "decisions/ADR-20261002-b.md") == ("superseded", "ADR-20261001-a")

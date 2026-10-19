@@ -1,0 +1,29 @@
+name: smoke
+on: workflow_dispatch
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - name: Skip without the secret
+        if: env.ANTHROPIC_API_KEY == ''
+        run: echo "::notice::ANTHROPIC_API_KEY is not set; smoke tests skipped"
+      - if: env.ANTHROPIC_API_KEY != ''
+        uses: actions/checkout@v4
+      - if: env.ANTHROPIC_API_KEY != ''
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+      - if: env.ANTHROPIC_API_KEY != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - if: env.ANTHROPIC_API_KEY != ''
+        run: npm install -g @anthropic-ai/claude-code
+      - if: env.ANTHROPIC_API_KEY != ''
+        run: uv sync --locked && uv run pytest -m smoke -v

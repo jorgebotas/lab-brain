@@ -20,7 +20,9 @@ Skills (run inside a vault):
 
 Claude uses `brain-core` automatically when it works in a vault: its description triggers it.
 The skills run the engine bundled with the plugin through `uvx`, so `uv` must be installed.
-Update with `claude plugin update lab-brain@lab-brain`.
+Update with `claude plugin update lab-brain@lab-brain`. An installed plugin builds its engine
+once per version; when you run the plugin from a local checkout, uv older than 0.11 may reuse
+a stale build of it, which `UV_NO_CACHE=1` (or uv 0.11 or newer) avoids.
 
 ## Commands
 

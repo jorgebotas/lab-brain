@@ -573,19 +573,19 @@ An independent review against the engine code and current docs changed the follo
 
 An adversarial audit of PR #4 reproduced the bugs below. These behaviours now supersede the earlier sections where they differ:
 
-- **Supersession waits for the successor.** `sync` ignores `supersedes:` on a decision that is still `proposed` or an experiment that is still `planned`. The old note is marked superseded once the successor is accepted or done and sync runs again.
-- **Protected text is refused before writing.** When `protected_data` is true, `new` and `exp record` scan the text they would write (title, and with it the minted ID; summary, body, hypothesis) with the PHI scanner. A hit not covered by the allowlist writes nothing and exits 2 with `the note text matches a protected-data pattern (<rule>); rephrase it`. With `--into`, only the lines the command adds are checked.
+- **Supersession waits for the successor.** `sync` ignores `supersedes:` until the successor is in force: a decision once it is `accepted`, an experiment once it is `done`. A `planned`, `running` or `failed` experiment does not supersede yet. A successor that has itself been superseded still counts, so sync never undoes a supersession it already made.
+- **Protected text is refused before writing.** When `protected_data` is true, `new` and `exp record` scan only the text the user supplied: the title (and the ID minted from it), summary, body and hypothesis. Generated Setup, Results and metrics are left to the `phi` lint rule, where a hit can be allowlisted. A hit not covered by the allowlist writes nothing and exits 2 with `the note text matches a protected-data pattern (<rule>); rephrase it`. With `--into`, only the hypothesis it sets is checked.
 - **Generated blocks are marked and replaced.** `exp record` wraps the Setup and Results blocks it generates in `<!-- labbrain:setup -->`/`<!-- labbrain:results -->` marker comments. A later `--into` replaces a marked block in place and appends only when no marked block exists. Re-filling a `running` experiment therefore leaves no stale results.
 - **More refusals, all exit 2:**
   - a `--summary` or `--hypothesis` that is a heading or opens a code fence;
   - a `--body` with unbalanced fences;
   - duplicate run IDs;
   - run-file keys that collide when flattened;
-  - run data nested more than 200 levels deep;
+  - YAML or JSON nested more than 200 levels deep, or containing a recursive alias. This applies to every YAML read: note frontmatter, config, allowlist and run files;
   - run files that cannot be encoded as UTF-8;
   - a `--into` target that is not valid UTF-8.
 - **Robust parsing.** YAML constructor errors (for example an impossible date) count as invalid YAML everywhere, so notes, run files and config report findings instead of crashing. `config_hash` stays unchanged for ordinary configs and falls back to stringified keys when a key sort fails.
 - **Output.** Table cells collapse control characters and newlines. Floats are written in a form YAML 1.1 reads back as a float (`1.0e-07`). Section matching uses the parser's own heading rule.
-- **`code sha`** takes the vault prefix from git and excludes it as a literal pathspec.
+- **`code sha`** takes the vault prefix from git and excludes it as a literal pathspec. A vault that is its own repository inside the code repo (a submodule or nested clone) is excluded by its path.
 - **Skills** write free-text options as `--option='value'`, so a value may start with `-`. They stop and ask for a rephrase on the protected-data refusal.
 - **Smoke harness and gate** run with `UV_NO_CACHE=1`, because whether `[tool.uv] cache-keys` triggers a rebuild of a local checkout depends on the uv version.

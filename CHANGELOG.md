@@ -27,8 +27,8 @@ All notable changes to this project are documented here. Versions follow semanti
 ### Changed
 
 - New notes are created exclusively, so two writers can never overwrite each other's note.
-- `sync` lets a `proposed` decision or a `planned` experiment supersede its target only once it
-  is accepted or done.
+- `sync` lets a decision supersede its target only once it is `accepted`, and an experiment only
+  once it is `done`.
 - `exp record --into` replaces the Setup and Results blocks it wrote earlier (marked
   `<!-- labbrain:setup -->` and `<!-- labbrain:results -->`) instead of appending a second copy,
   so a running experiment can be recorded again when its runs finish.
@@ -39,8 +39,8 @@ All notable changes to this project are documented here. Versions follow semanti
 
 ### Fixed
 
-- With `protected_data` on, `new` and `exp record` refuse (exit 2) note text that matches a
-  protected-data pattern, before writing anything.
+- With `protected_data` on, `new` and `exp record` refuse (exit 2) a title, summary, body or
+  hypothesis that matches a protected-data pattern, before writing anything.
 - Refused with exit 2 instead of writing a broken note: a `--summary` that starts with a code
   fence, a `--body` with unbalanced code fences, a heading-like `--hypothesis`, and duplicate
   run IDs.

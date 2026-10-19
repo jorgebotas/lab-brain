@@ -387,6 +387,20 @@ def cmd_tracker_fetch(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_tracker_diff(args: argparse.Namespace) -> int:
+    from labbrain.experiments import config_diff, parent_run_ids, render_setup
+    from labbrain.trackers import get_adapter
+    from labbrain.vault import Vault
+
+    root, config = _config(args)
+    vault = Vault.load(root, config)
+    adapter = get_adapter(config, root)
+    parent = [r["config"] for r in adapter.fetch(parent_run_ids(vault, args.parent))]
+    child = [r["config"] for r in adapter.fetch(args.runs)]
+    print(render_setup(config_diff(args.parent, parent, child, config.hash_ignore)), end="")
+    return EXIT_OK
+
+
 # --- parser -----------------------------------------------------------------------
 
 
@@ -516,6 +530,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = tracker_sub.add_parser("fetch", help="print runs as JSON", parents=[common])
     p.add_argument("runs", nargs="+", metavar="RUN")
     p.set_defaults(func=cmd_tracker_fetch)
+    p = tracker_sub.add_parser(
+        "diff", help="config diff against a parent experiment", parents=[common]
+    )
+    p.add_argument("runs", nargs="+", metavar="RUN")
+    p.add_argument("--parent", required=True, help="experiment ID whose runs are the baseline")
+    p.set_defaults(func=cmd_tracker_diff)
     return parser
 
 

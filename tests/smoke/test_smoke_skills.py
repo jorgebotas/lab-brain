@@ -67,7 +67,8 @@ def test_exp_log_with_parent(claude_bin: str, smoke_vault: Path) -> None:
 def test_exp_log_refuses_done_without_protocol(claude_bin: str, smoke_vault: Path) -> None:
     folder = smoke_vault / "experiments"
     before = notes_in(folder)
-    # run_skill fails on any permission denial, so the engine really ran and refused.
+    # run_skill fails on any permission denial, but only `tracker fetch` is proven to have run:
+    # the skill asks for the protocol before `exp record`, so the engine's refusal is not.
     result = run_skill(claude_bin, smoke_vault, "/lab-brain:exp-log run-noproto")
     for path in notes_in(folder) - before:
         data = parse_note(path, smoke_vault).data

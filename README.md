@@ -12,14 +12,15 @@ This repository is also a Claude Code plugin. In Claude Code:
 Skills (run inside a vault):
 
 - `/lab-brain:idea <text>`: capture an idea in `ideas/inbox/`
-- `/lab-brain:exp-log <run-id...> [--parent EXP-ID] [--planned]`: log runs as an experiment
+- `/lab-brain:exp-log <run-id...> [--parent EXP-ID] [--into EXP-ID] [--planned]`: log runs as an
+  experiment
 - `/lab-brain:decide <summary>`: record a decision
 - `/lab-brain:handoff`: write the session handoff
 - `/lab-brain:brief`: where the project stands
 
-`brain-core` loads on its own in any vault. The skills run the engine bundled with the
-plugin through `uvx`, so `uv` must be installed. Update with
-`claude plugin update lab-brain@lab-brain`.
+Claude uses `brain-core` automatically when it works in a vault: its description triggers it.
+The skills run the engine bundled with the plugin through `uvx`, so `uv` must be installed.
+Update with `claude plugin update lab-brain@lab-brain`.
 
 ## Commands
 
@@ -39,7 +40,8 @@ plugin through `uvx`, so `uv` must be installed. Update with
     labbrain code sha                   # code repo commit and dirty flag
     labbrain brief                      # recent handoffs, open work, lint counts
 
-Exit codes: 0 clean, 1 errors found, 2 usage or configuration problem.
+Exit codes: 0 clean, 1 errors found, 2 usage, configuration or tracker problem, or a refused
+write.
 
 ## Development
 

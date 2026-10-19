@@ -39,3 +39,4 @@ The parent spec asks for a single-plugin marketplace in the engine repo. Skills 
 - Each plugin version builds its own engine.
 - A vault's `CLAUDE.md` keeps its own pinned command for humans and pre-commit, and `engine_min_version` warns when either copy is too old.
 - `pyproject.toml` now holds a static `version = "0.2.0"` instead of a dynamic hatch version, so the manifest test can compare it with `labbrain.__version__` and `plugin.json`.
+- `uv.lock` also records the package version, so a version bump needs `uv lock`; CI's `uv sync --locked` fails on a missed one.

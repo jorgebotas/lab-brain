@@ -417,6 +417,31 @@ def cmd_tracker_diff(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_exp_record(args: argparse.Namespace) -> int:
+    from labbrain.experiments import RecordRequest, record
+
+    author = _author(args)
+    root, config = _config(args)
+    request = RecordRequest(
+        run_ids=args.runs,
+        author=author,
+        now=_now(args.at),
+        title=args.title,
+        into=args.into,
+        parent=args.parent,
+        protocol=args.protocol,
+        dataset=args.dataset,
+        hypothesis=args.hypothesis,
+        summary=args.summary,
+        links=args.link,
+    )
+    path = record(root, config, request)
+    print(path)
+    if args.finish:
+        return _finish(args, [path], args.finish, author)
+    return EXIT_OK
+
+
 # --- parser -----------------------------------------------------------------------
 
 
@@ -560,6 +585,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--repo", help="code repository (default: code_repo from config)")
     p.set_defaults(func=cmd_code_sha)
+
+    exp = add("exp", "experiment commands")
+    exp_sub = exp.add_subparsers(dest="exp_command", required=True)
+    p = exp_sub.add_parser("record", help="write an experiment note from runs", parents=[common])
+    p.add_argument("runs", nargs="+", metavar="RUN")
+    p.add_argument("--author", default=None)
+    target = p.add_mutually_exclusive_group(required=True)
+    target.add_argument("--title", help="create a new experiment with this title")
+    target.add_argument("--into", help="fill in this planned or running experiment")
+    p.add_argument("--parent", help="experiment whose runs these change (config diff)")
+    p.add_argument("--protocol", help="protocol ID (default: the runs' protocol key)")
+    p.add_argument("--dataset", help="dataset ID (default: the runs' dataset key)")
+    p.add_argument("--hypothesis")
+    p.add_argument("--summary", default="", help="one line for the For-future-agents block")
+    p.add_argument("--link", action="append", default=[], help="ID to put in `links` (repeatable)")
+    p.add_argument("--at", default=None, help="ISO datetime to use instead of now")
+    p.add_argument("--finish", default="", help="then run `finish` with this log text")
+    p.set_defaults(func=cmd_exp_record)
     return parser
 
 

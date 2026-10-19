@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from datetime import date, datetime
+from pathlib import Path
+from typing import Any, get_args
+
+from ruamel.yaml.comments import CommentedMap
 
 from labbrain.confighash import is_ignored
 from labbrain.errors import EngineError
 from labbrain.findings import display_id
-from labbrain.vault import Vault
+from labbrain.notes import Note, atomic_write, split_frontmatter, update_frontmatter
+from labbrain.schema import ExperimentNote
+from labbrain.trackers.base import RunRecord, TrackerAdapter
+from labbrain.vault import Config, Vault, resolve_config_path
 
 _ABSENT = object()
 
@@ -127,3 +135,261 @@ def render_setup(diff: ConfigDiff) -> str:
 def render_runs(run_ids: Sequence[str], varied: Sequence[str]) -> str:
     lines = [f"Runs: {', '.join(run_ids)}.", *_varied(varied, "Varied across these runs")]
     return "\n".join(lines) + "\n"
+
+
+SPLITS = frozenset({"train", "val", "valid", "validation", "test"})
+FILLABLE = ("planned", "running")
+_EXPERIMENT_STATUSES = frozenset(get_args(ExperimentNote.model_fields["status"].annotation))
+
+
+@dataclass
+class RecordRequest:
+    run_ids: list[str]
+    author: str
+    now: datetime
+    title: str | None = None
+    into: str | None = None
+    parent: str | None = None
+    protocol: str | None = None
+    dataset: str | None = None
+    hypothesis: str | None = None
+    summary: str = ""
+    links: list[str] = field(default_factory=list)
+
+
+def split_of(name: str) -> str | None:
+    head = re.split(r"[/.]", name, maxsplit=1)[0]
+    return head if head in SPLITS and head != name else None
+
+
+def run_status(statuses: Iterable[str]) -> str:
+    statuses = list(statuses)
+    if "failed" in statuses:
+        return "failed"
+    if any(s in ("running", "unknown") for s in statuses):
+        return "running"
+    return "done"
+
+
+def _flow(data: Mapping[str, Any]) -> CommentedMap:
+    mapping = CommentedMap(data)
+    mapping.fa.set_flow_style()
+    return mapping
+
+
+def _status_label(value: str | None) -> str:
+    return value if value in _EXPERIMENT_STATUSES else "<invalid status>"
+
+
+def _shared(values: Iterable[str | None], what: str) -> str | None:
+    found = {v for v in values if v}
+    if len(found) > 1:
+        raise RecordError(f"runs disagree on {what}; pass --{what}")
+    return found.pop() if found else None
+
+
+def _resolve(
+    given: str | None, planned: str | None, runs: Iterable[str | None], what: str
+) -> str | None:
+    if given:
+        return given
+    if planned:
+        return planned
+    return _shared(runs, what)
+
+
+def _require(vault: Vault, note_id: str | None, note_type: str) -> None:
+    if note_id is None:
+        return
+    note = vault.get(note_id)
+    if note is None or note.type != note_type:
+        raise RecordError(f"{note_type} not found")
+
+
+def _fillable(vault: Vault, note_id: str) -> Note:
+    note = vault.get(note_id)
+    if note is None or note.type != "experiment":
+        raise RecordError(f"no experiment with ID {display_id(note_id, vault.notes)}")
+    status = note.get_str("status")
+    if status not in FILLABLE:
+        raise RecordError(
+            f"{note_id} is {_status_label(status)}; only planned or running experiments can be filled in"
+        )
+    return note
+
+
+def resolve_code(records: Sequence[RunRecord], config: Config, root: Path) -> CommentedMap | None:
+    from labbrain.codeinfo import CodeError, code_sha
+
+    repo = config.code_repo.strip() or None
+    shas = {r["git_sha"] for r in records if r["git_sha"]}
+    dirty = any(r["git_dirty"] for r in records)
+    if len(shas) > 1:
+        return None
+    if shas:
+        return _flow({"repo": repo, "sha": shas.pop(), "dirty": dirty})
+    if repo is None:
+        return None
+    try:
+        info = code_sha(resolve_config_path(root, repo), exclude=root)
+    except CodeError:
+        return None
+    return _flow({"repo": repo, "sha": info.sha, "dirty": dirty or info.dirty})
+
+
+def _day(day: date) -> date:
+    """A distinct `date` equal to `day`: ruamel writes a repeated object as a YAML alias."""
+    return date(day.year, day.month, day.day)
+
+
+def build_metrics(described: Sequence[Mapping[str, Any]], today: date) -> list[CommentedMap]:
+    return [
+        _flow(
+            {
+                "name": name,
+                "value": d["headline"][name],
+                "split": split_of(name),
+                "run_id": d["run_id"],
+                "as_of": _day(today),
+            }
+        )
+        for d in described
+        for name in sorted(d["headline"])
+    ]
+
+
+def render_results(metrics: Sequence[Mapping[str, Any]]) -> str:
+    if not metrics:
+        return "No headline metrics recorded.\n"
+    lines = ["| metric | value | split | run |", "| --- | --- | --- | --- |"]
+    for m in metrics:
+        lines.append(
+            f"| {escape_cell(m['name'])} | {json.dumps(m['value'])} | {m['split'] or '—'}"
+            f" | {escape_cell(m['run_id'])} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def append_to_section(text: str, heading: str, block: str) -> str:
+    """`text` with `block` added at the end of its `## heading` section, fences respected."""
+    _, _, body_line = split_frontmatter(text)
+    lines = text.splitlines(keepends=True)
+    start, end, fence = None, len(lines), False
+    for i in range(body_line - 1, len(lines)):
+        stripped = lines[i].lstrip()
+        if stripped.startswith(("```", "~~~")):
+            fence = not fence
+            continue
+        if fence or not lines[i].startswith("## "):
+            continue
+        if start is not None:
+            end = i
+            break
+        if lines[i][3:].strip() == heading:
+            start = i
+    if start is None:
+        raise RecordError(f"note has no ## {heading} section")
+    newline = "\r\n" if lines[start].endswith("\r\n") else "\n"
+    head = lines[:end]
+    while len(head) - 1 > start and not head[-1].strip():
+        head.pop()
+    if not head[-1].endswith(("\n", "\r\n")):
+        head[-1] += newline
+    insertion = [newline, *(row + newline for row in block.rstrip("\n").split("\n"))]
+    tail = lines[end:]
+    if tail:
+        insertion.append(newline)
+    return "".join(head + insertion + tail)
+
+
+def _fill(note: Note, fields: dict[str, Any], links: list[str], setup: str, results: str) -> Path:
+    merged = list(dict.fromkeys([*note.get_list("links"), *links]))
+    with open(note.path, encoding="utf-8", newline="") as handle:
+        text = handle.read()
+    text = append_to_section(text, "Setup", setup)
+    text = append_to_section(text, "Results", results)
+    atomic_write(note.path, text)
+    update_frontmatter(note.path, {**fields, "links": merged})
+    return note.path
+
+
+def record(
+    root: Path, config: Config, req: RecordRequest, adapter: TrackerAdapter | None = None
+) -> Path:
+    """Create an experiment note from runs, or fill in a planned or running one."""
+    from labbrain.scaffold import create, one_line
+    from labbrain.trackers import describe, get_adapter
+
+    vault = Vault.load(root, config)
+    for note_id in [req.parent, *req.links]:
+        if note_id and vault.get(note_id) is None:
+            raise RecordError(f"no note with ID {display_id(note_id, vault.notes)}")
+    target = _fillable(vault, req.into) if req.into else None
+    adapter = adapter or get_adapter(config, root)
+    records = adapter.fetch(req.run_ids)
+    described = [describe(r, config) for r in records]
+    protocol = _resolve(
+        req.protocol,
+        target.get_str("protocol") if target else None,
+        (d["protocol"] for d in described),
+        "protocol",
+    )
+    dataset = _resolve(
+        req.dataset,
+        target.get_str("dataset") if target else None,
+        (d["dataset"] for d in described),
+        "dataset",
+    )
+    _require(vault, protocol, "protocol")
+    _require(vault, dataset, "dataset")
+    status = run_status(r["status"] for r in records)
+    missing = [w for w, v in (("protocol", protocol), ("dataset", dataset)) if not v]
+    if status == "done" and missing:
+        keys = {"protocol": config.protocol_key, "dataset": config.dataset_key}
+        raise RecordError(
+            f"{' and '.join(missing)} required to record finished runs: "
+            f"pass {'/'.join('--' + w for w in missing)} "
+            f"or set {'/'.join(keys[w] for w in missing)} in the run config"
+        )
+    hashes = {d["config_hash"] for d in described}
+    url = next((r["url"] for r in records if r["url"]), None)
+    today = req.now.date()
+    metrics = build_metrics(described, today)
+    fields: dict[str, Any] = {
+        "updated": today,
+        "status": status,
+        "protocol": protocol,
+        "tracker": _flow(
+            {"backend": config.tracker.backend, "run_ids": list(req.run_ids), "url": url}
+        ),
+        "code": resolve_code(records, config, root),
+        "config_hash": hashes.pop() if len(hashes) == 1 else None,
+        "dataset": dataset,
+        "metrics": metrics,
+    }
+    hypothesis = one_line(req.hypothesis or "")
+    if hypothesis:
+        fields["hypothesis"] = hypothesis
+    if req.parent:
+        parent = [r["config"] for r in adapter.fetch(parent_run_ids(vault, req.parent))]
+        diff = config_diff(req.parent, parent, [r["config"] for r in records], config.hash_ignore)
+        setup = render_setup(diff)
+    else:
+        _, varied = split_common([r["config"] for r in records], config.hash_ignore)
+        setup = render_runs(req.run_ids, varied)
+    results = render_results(metrics)
+    links = list(dict.fromkeys(i for i in [req.parent, *req.links] if i))
+    if target is not None:
+        return _fill(target, fields, links, setup, results)
+    return create(
+        root,
+        config,
+        "experiment",
+        title=req.title or "",
+        author=req.author,
+        now=req.now,
+        links=links,
+        summary=req.summary,
+        extra=fields,
+        section_text={"Hypothesis": hypothesis, "Setup": setup, "Results": results},
+    )

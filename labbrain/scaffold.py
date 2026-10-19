@@ -122,6 +122,7 @@ def skeleton(
     body: str = "",
     tags: Iterable[str] = (),
     status: str | None = None,
+    section_text: Mapping[str, str] | None = None,
 ) -> str:
     data = CommentedMap()
     data["id"] = note_id
@@ -144,7 +145,9 @@ def skeleton(
     text = "\n".join(_body_lines(body)).strip("\n")
     if text.strip():
         sections.append(f"## {BODY_HEADING}\n\n{text}\n")
-    sections += [f"## {section}\n" for section in REQUIRED_SECTIONS[note_type]]
+    for section in REQUIRED_SECTIONS[note_type]:
+        text = (section_text or {}).get(section, "").strip("\n")
+        sections.append(f"## {section}\n\n{text}\n" if text else f"## {section}\n")
     return render_note(data, "\n".join(sections))
 
 
@@ -165,6 +168,8 @@ def create(
     body: str = "",
     tags: Iterable[str] = (),
     status: str | None = None,
+    extra: Mapping[str, Any] | None = None,
+    section_text: Mapping[str, str] | None = None,
 ) -> Path:
     if status is not None and status not in allowed_statuses(note_type):
         choices = ", ".join(allowed_statuses(note_type))
@@ -187,13 +192,14 @@ def create(
             year=year,
             name=name,
         )
-        extra: dict[str, Any] = {}
+        fields: dict[str, Any] = {}
         if note_type == "protocol":
-            extra["version"] = protocol_version(note_id, config.id_prefixes)
+            fields["version"] = protocol_version(note_id, config.id_prefixes)
         elif note_type == "handoff":
-            extra["agent"] = agent
+            fields["agent"] = agent
         elif note_type == "literature":
-            extra["year"] = year
+            fields["year"] = year
+        fields.update(extra or {})
         path = root / TYPE_FOLDERS[note_type] / f"{note_id}.md"
         text = skeleton(
             note_type,
@@ -203,11 +209,12 @@ def create(
             now=now,
             config=config,
             links=links,
-            extra=extra,
+            extra=fields,
             summary=summary,
             body=body,
             tags=tags,
             status=status,
+            section_text=section_text,
         )
         try:
             atomic_create(path, text)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -292,12 +293,30 @@ def test_huge_integer_metrics_are_dropped(tmp_path: Path) -> None:
     assert adapter(root).fetch(["r1"])[0]["summary"] == {"ok": 2.0}
 
 
-def test_symlinked_file_into_a_data_path_is_refused(tmp_path: Path) -> None:
+SECRET_FILES = {"config.yaml": "a: 1\n", "metrics.json": '{"m": 1}', "meta.json": '{"name": "x"}'}
+
+
+@pytest.mark.parametrize("name", sorted(SECRET_FILES))
+def test_symlinked_file_into_a_data_path_is_refused(tmp_path: Path, name: str) -> None:
     secret = tmp_path / "secret"
     root = make_vault(tmp_path / "v", MIN_CONFIG + f"data_paths: ['{secret}']\n")
-    write(tmp_path, "secret/m.json", '{"m": 1}')
-    add_run(root, "r1", {"config.yaml": "a: 1\n"})
-    (root / "runs" / "r1" / "metrics.json").symlink_to(secret / "m.json")
+    write(tmp_path, f"secret/{name}", SECRET_FILES[name])
+    add_run(root, "r1", {k: v for k, v in SECRET_FILES.items() if k != name})
+    (root / "runs" / "r1" / name).symlink_to(secret / name)
+    with pytest.raises(TrackerError, match="protected data path"):
+        adapter(root).fetch(["r1"])
+
+
+@pytest.mark.parametrize("name", sorted(SECRET_FILES))
+def test_hard_linked_protected_file_is_refused(tmp_path: Path, name: str) -> None:
+    """A data path naming a file is matched by file identity, which a hard link shares."""
+    secret = write(tmp_path, f"secret/{name}", SECRET_FILES[name])
+    root = make_vault(tmp_path / "v", MIN_CONFIG + f"data_paths: ['{secret}']\n")
+    add_run(root, "r1", {k: v for k, v in SECRET_FILES.items() if k != name})
+    try:
+        os.link(secret, root / "runs" / "r1" / name)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"hard links are not supported here ({type(exc).__name__})")
     with pytest.raises(TrackerError, match="protected data path"):
         adapter(root).fetch(["r1"])
 

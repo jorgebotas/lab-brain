@@ -171,3 +171,30 @@ def test_keys_with_line_breaks_cannot_add_headings() -> None:
     assert "| a ## Results b | 1 | 2 |" in texts[0]
     assert "a ## Results b" in texts[1] and "a ## Results b" in texts[2]
     assert "| a ## Results b | 1.0 |" in texts[3]
+
+
+def _free_text_id() -> str:
+    digits = "".join(str(d) for d in (4, 8, 1, 5, 1, 6, 2))
+    return "MRN-" + digits + " " + "Ja" + "ne" + " " + "Do" + "e"
+
+
+@pytest.mark.parametrize(
+    ("flag", "message"),
+    [
+        ("--into", "no experiment with ID <not a valid note ID>"),
+        ("--parent", "no note with ID <not a valid note ID>"),
+        ("--link", "no note with ID <not a valid note ID>"),
+    ],
+)
+def test_free_text_ids_are_not_echoed(
+    vault_dir: Path, capsys: pytest.CaptureFixture[str], flag: str, message: str
+) -> None:
+    copy_runs(vault_dir)
+    free = _free_text_id()
+    argv = ["exp", "record", "run-c1", "--author", "claude", flag, free]
+    if flag != "--into":
+        argv += ["--title", "Free text"]
+    assert main(argv) == 2
+    out, err = capsys.readouterr()
+    assert err == f"labbrain: {message}\n"
+    assert free.split()[0][4:] not in out + err and "Jane" not in out + err

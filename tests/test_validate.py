@@ -76,3 +76,23 @@ def test_discovery_without_vault_is_info(tmp_path: Path, monkeypatch: pytest.Mon
     assert [(f.rule, f.severity, f.message) for f in findings] == [
         ("validate", "info", "not inside a vault; skipped")
     ]
+
+
+def test_impossible_created_date_is_a_finding_everywhere(
+    vault_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from labbrain.cli import main
+
+    path = vault_dir / "ideas" / "IDEA-20261001-odd.md"
+    path.write_text(
+        "---\nid: IDEA-20261001-odd\ntype: idea\ntitle: Odd\ncreated: 2026-02-30\n"
+        "updated: 2026-10-01\nauthor: alice\nstatus: open\n---\n## Idea\n\nx\n"
+    )
+    for argv, expected in ((["validate", str(path)], 1), (["lint"], 1), (["brief"], 0)):
+        assert main(argv) == expected, argv
+        out, err = capsys.readouterr()
+        assert "internal error" not in err
+        if argv[0] != "brief":
+            assert (
+                "ideas/IDEA-20261001-odd.md:1: error [schema] frontmatter is not valid YAML" in out
+            )

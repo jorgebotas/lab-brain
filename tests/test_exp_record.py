@@ -508,3 +508,16 @@ def test_duplicate_run_ids_are_refused(
     code, _, err = record(capsys, "run-c1", "run-c1", "--author", "claude", "--title", "Twice")
     assert code == 2 and err == "labbrain: run run-c1 given more than once\n"
     assert new_experiments(runs_vault) == []
+
+
+def test_exponent_metrics_read_back_as_floats(
+    runs_vault: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    variant(runs_vault, "run-tiny", base="run-noproto")
+    (runs_vault / "runs" / "run-tiny" / "metrics.json").write_text('{"val.loss": 1e-07}')
+    code, out, err = record(
+        capsys, "run-tiny", "--author", "claude", "--title", "Tiny loss", "--protocol", "EVAL-v2"
+    )
+    assert code == 0, err
+    [metric] = parse_note(Path(out.strip()), runs_vault).data["metrics"]
+    assert metric["value"] == 1e-07 and isinstance(metric["value"], float)

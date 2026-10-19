@@ -349,3 +349,23 @@ def test_update_frontmatter_keeps_a_bom(tmp_path: Path) -> None:
 def test_decode_note_translates_newlines() -> None:
     """Files and git blobs decode the same way, so a CR-only note still parses at base."""
     assert decode_note(b"\xef\xbb\xbf---\rid: x\r\n---\r") == "---\nid: x\n---\n"
+
+
+def test_impossible_dates_are_invalid_yaml_not_a_crash() -> None:
+    note = parse("---\nid: x\ncreated: 2026-02-30\n---\nSee [[EXP-20261001-baseline]].\n")
+    assert note.data is None
+    assert note.errors == ["frontmatter is not valid YAML (line 1)"]
+    assert [r.target for r in note.refs] == ["EXP-20261001-baseline"]
+
+
+@pytest.mark.parametrize("value", [1e-07, 1e20, -2e-10, 1.5e-07, 0.85, 3.0])
+def test_tool_written_floats_read_back_as_floats(tmp_path: Path, value: float) -> None:
+    from labbrain.notes import dump_frontmatter, safe_load
+
+    loaded = safe_load(dump_frontmatter({"value": value, "nested": [{"v": value}]}))
+    assert loaded == {"value": value, "nested": [{"v": value}]}
+    assert type(loaded["value"]) is float
+    path = tmp_path / "note.md"
+    path.write_text(SAMPLE)
+    update_frontmatter(path, {"score": value})
+    assert parse_note(path, tmp_path).get("score") == value

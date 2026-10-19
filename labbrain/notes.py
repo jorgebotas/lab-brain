@@ -26,6 +26,7 @@ import yaml
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from ruamel.yaml.error import YAMLError as RuamelYAMLError
+from ruamel.yaml.representer import RoundTripRepresenter
 from ruamel.yaml.scalarstring import SingleQuotedScalarString
 
 from labbrain.schema import FUTURE_AGENTS_HEADING, ID_FIELDS, BaseNote, validate_frontmatter
@@ -68,18 +69,50 @@ class _StrictLoader(_LOADER):  # type: ignore[misc,valid-type]
         return super().construct_mapping(node, deep=deep)
 
 
+class UnreadableValueError(yaml.YAMLError):
+    """Well-formed YAML holding a value the loader cannot build: an impossible date
+    (`2026-02-30`), or nesting too deep to construct. Carries no position or text."""
+
+
 def safe_load(text: str) -> Any:
-    """Fast, safe YAML read. Raises yaml.YAMLError on invalid input or duplicate keys."""
-    return yaml.load(text, Loader=_StrictLoader)  # safe: subclass of (C)SafeLoader
+    """Fast, safe YAML read. Raises yaml.YAMLError on invalid input or duplicate keys,
+    and UnreadableValueError (also a yaml.YAMLError) for values that cannot be built."""
+    try:
+        return yaml.load(text, Loader=_StrictLoader)  # safe: subclass of (C)SafeLoader
+    except yaml.YAMLError:
+        raise
+    except (ValueError, TypeError, RecursionError):
+        # The constructor's message can name the value; `from None` drops it.
+        raise UnreadableValueError("a value cannot be read") from None
 
 
 _YAML11_RESOLVER = yaml.resolver.Resolver()
 _STR_TAG = "tag:yaml.org,2002:str"
+_FLOAT_TAG = "tag:yaml.org,2002:float"
+
+
+class _Yaml11Float(float):
+    """A float whose repr has an exponent but no point (`1e-07`), which YAML 1.1 (PyYAML)
+    reads as a string; it is written as `1.0e-07`, a float under both YAML 1.1 and 1.2."""
+
+
+def _represent_yaml11_float(representer: RoundTripRepresenter, value: float) -> Any:
+    mantissa, exponent = repr(float(value)).split("e")
+    return representer.represent_scalar(_FLOAT_TAG, f"{mantissa}.0e{exponent}")
+
+
+RoundTripRepresenter.add_representer(_Yaml11Float, _represent_yaml11_float)
+
+
+def _needs_point(value: float) -> bool:
+    text = repr(value)
+    return "e" in text and "." not in text
 
 
 def _yaml11_safe(value: Any) -> Any:
     """`value` with every plain string PyYAML (YAML 1.1) would not read back as a string
-    single-quoted, recursing into lists and mappings.
+    single-quoted, and every float written as `1e-07` given a point, recursing into lists
+    and mappings.
 
     ruamel writes YAML 1.2, where ``yes``, ``No``, ``on`` or ``12:30`` are plain strings,
     but reads go through PyYAML, which resolves them to booleans and numbers. Only values
@@ -87,6 +120,8 @@ def _yaml11_safe(value: Any) -> Any:
     dumped as they were, so a frontmatter update never rewrites another field's line.
     Ruamel containers are updated in place so their flow style and comments survive.
     """
+    if type(value) is float and _needs_point(value):
+        return _Yaml11Float(value)
     if isinstance(value, str):
         if type(value) is str and (
             _YAML11_RESOLVER.resolve(yaml.ScalarNode, value, (True, False)) != _STR_TAG

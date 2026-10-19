@@ -22,3 +22,18 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pytest --cov --cov-fail-under=85
+
+  plugin-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install -g @anthropic-ai/claude-code
+      - name: Require Claude Code 2.1.289 or later
+        run: |
+          version=$(claude --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          echo "claude $version"
+          printf '%s\n%s\n' 2.1.289 "$version" | sort -V -C || { echo "need claude >= 2.1.289"; exit 1; }
+      - run: claude plugin validate . --strict

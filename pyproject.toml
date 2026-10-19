@@ -46,7 +46,9 @@ testpaths = ["tests"]
 markers = [
     "slow: performance-budget tests",
     "network: needs network access (pre-commit try-repo)",
+    "smoke: headless Claude Code runs; need claude plus ANTHROPIC_API_KEY or LABBRAIN_SMOKE_LOGIN=1",
 ]
+addopts = ["-m", "not smoke"]
 
 [tool.coverage.run]
 source = ["labbrain"]

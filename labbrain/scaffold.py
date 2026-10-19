@@ -222,6 +222,10 @@ def create(
             status=status,
             section_text=section_text,
         )
+        if config.protected_data:
+            from labbrain.phi import check_note_text
+
+            check_note_text(root, config, path.relative_to(root).as_posix(), text)
         try:
             atomic_create(path, text)
         except FileExistsError:

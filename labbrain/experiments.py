@@ -358,15 +358,23 @@ def append_to_section(text: str, heading: str, block: str, *, marker: str | None
 
 
 def _fill(
-    note: Note, label: str, fields: dict[str, Any], links: list[str], setup: str, results: str
+    root: Path,
+    config: Config,
+    note: Note,
+    label: str,
+    fields: dict[str, Any],
+    links: list[str],
+    setup: str,
+    results: str,
 ) -> Path:
     """Write Setup/Results and update the frontmatter of `note` in one atomic write."""
     merged = list(dict.fromkeys([*note.get_list("links"), *links]))
     try:
         with open(note.path, "rb") as handle:
-            text = handle.read().decode("utf-8")
+            original = handle.read().decode("utf-8")
     except UnicodeDecodeError:
         raise RecordError(f"{label}: note is not valid UTF-8") from None
+    text = original
     for heading, marker, block in (
         ("Setup", SETUP_MARKER, setup),
         ("Results", RESULTS_MARKER, results),
@@ -381,7 +389,12 @@ def _fill(
         updated = update_frontmatter_text(text, {**fields, "links": merged}, name=note.path.name)
     except ValueError:
         raise RecordError(f"{label}: frontmatter cannot be updated") from None
-    atomic_write(note.path, updated if updated is not None else text)
+    text = updated if updated is not None else text
+    if config.protected_data:
+        from labbrain.phi import check_note_text
+
+        check_note_text(root, config, note.rel, text, before=original)
+    atomic_write(note.path, text)
     return note.path
 
 
@@ -465,7 +478,7 @@ def record(
     links = list(dict.fromkeys(i for i in [req.parent, *req.links] if i))
     if target is not None:
         label = display_id(req.into or "", vault.notes)
-        return _fill(target, label, fields, links, setup, results)
+        return _fill(root, config, target, label, fields, links, setup, results)
     return create(
         root,
         config,

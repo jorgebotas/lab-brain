@@ -25,6 +25,7 @@ from pathlib import Path, PurePosixPath
 
 import yaml
 
+from labbrain.errors import EngineError
 from labbrain.findings import ERROR, Finding, sort_findings
 from labbrain.layout import ALLOWLIST_PATH, INDEX_FILE, PHI_SKIP_DIR_NAMES, PHI_SKIP_FILES
 from labbrain.notes import safe_load
@@ -558,3 +559,51 @@ def scan(
                     Finding(rel, hit.line, rule_name or hit.rule, ERROR, message, col=hit.col)
                 )
     return sort_findings(findings)
+
+
+class ProtectedTextError(EngineError):
+    """Text a command is about to write matches a PHI pattern (protected projects)."""
+
+
+def new_hit_rules(
+    text: str,
+    *,
+    rel: str,
+    settings: ScanSettings,
+    allow: frozenset[tuple[str, str, str]],
+    before: str | None = None,
+) -> list[str]:
+    """Sorted rule names of hits in `text` that the allowlist does not cover for `rel`.
+
+    With `before` (the file as it was), hits on lines already in it are left out: they
+    are the phi lint rule's to report, and do not belong to this write.
+    """
+    old = {(h.rule, h.line_sha) for h in scan_text(before, settings)} if before else set()
+    return sorted(
+        {
+            h.rule
+            for h in scan_text(text, settings)
+            if (rel, h.rule, h.line_sha) not in allow and (h.rule, h.line_sha) not in old
+        }
+    )
+
+
+def check_note_text(
+    root: Path, config: Config, rel: str, text: str, *, before: str | None = None
+) -> None:
+    """Refuse to write `text` as the note at `rel` (vault-relative) when the project is
+    protected and the text matches a PHI pattern the allowlist does not cover.
+
+    Called before anything is written, so the note ID and filename (minted from the
+    title) never carry an identifier. The message names rules only, never the text.
+    """
+    if not config.protected_data:
+        return
+    settings = ScanSettings.from_config(config, root)
+    rules = new_hit_rules(
+        text, rel=rel, settings=settings, allow=load_allowlist(root), before=before
+    )
+    if rules:
+        raise ProtectedTextError(
+            f"the note text matches a protected-data pattern ({', '.join(rules)}); rephrase it"
+        )

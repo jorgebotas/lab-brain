@@ -18,13 +18,12 @@ from typing import Any
 
 import yaml
 
-from labbrain.confighash import flatten
+from labbrain.confighash import flatten, well_formed
 from labbrain.findings import sanitize
 from labbrain.notes import safe_load
-from labbrain.trackers.base import RUN_STATUSES, RunRecord, TrackerError
+from labbrain.trackers.base import RUN_ID_RE, RUN_STATUSES, RunRecord, TrackerError
 from labbrain.vault import Config, resolve_config_path
 
-RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 SHA_RE = re.compile(r"[0-9a-f]{7,40}")
 
 
@@ -42,23 +41,33 @@ def _error(run_id: str, problem: str) -> TrackerError:
 
 
 def _read_yaml(path: Path, run_id: str) -> dict[str, Any]:
+    # ValueError: an impossible date (2026-13-45); RecursionError: very deep nesting.
     try:
         data = safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+    except (OSError, ValueError, TypeError, RecursionError, yaml.YAMLError):
         raise _error(run_id, f"{path.name} is not valid YAML") from None
     if not isinstance(data, dict):
         raise _error(run_id, f"{path.name} is not a mapping")
+    if not well_formed(data):  # a recursive alias, or a string that is not UTF-8
+        raise _error(run_id, f"{path.name} is not valid YAML")
     return data
 
 
 def _read_json(path: Path, run_id: str) -> dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, ValueError):
+    except (OSError, ValueError, TypeError, RecursionError):
         raise _error(run_id, f"{path.name} is not valid JSON") from None
-    if not isinstance(data, dict):
+    if not isinstance(data, dict) or not well_formed(data):
         raise _error(run_id, f"{path.name} is not valid JSON")
     return data
+
+
+def _flat(data: dict[str, Any], name: str, run_id: str) -> dict[str, Any]:
+    try:
+        return flatten(data)
+    except ValueError:
+        raise _error(run_id, f"{name} has keys that collide when flattened") from None
 
 
 def _finite(value: Any) -> float | None:
@@ -144,10 +153,11 @@ class LocalAdapter:
         config_path = self._guard(run_dir / "config.yaml")
         if not config_path.is_file():
             raise _error(run_id, "config.yaml not found")
-        config = _read_yaml(config_path, run_id)
+        config = _flat(_read_yaml(config_path, run_id), "config.yaml", run_id)
         metrics_path = self._guard(run_dir / "metrics.json")
         has_metrics = metrics_path.is_file()
-        summary = _numbers(flatten(_read_json(metrics_path, run_id))) if has_metrics else {}
+        metrics = _read_json(metrics_path, run_id) if has_metrics else {}
+        summary = _numbers(_flat(metrics, "metrics.json", run_id))
         meta_path = self._guard(run_dir / "meta.json")
         meta = _read_json(meta_path, run_id) if meta_path.is_file() else {}
         status = meta.get("status")
@@ -161,7 +171,7 @@ class LocalAdapter:
             status=status,  # type: ignore[typeddict-item]
             started_at=_when(meta.get("started_at")),
             ended_at=_when(meta.get("ended_at")),
-            config=flatten(config),
+            config=config,
             summary=summary,
             tags=_tags(meta.get("tags")),
             git_sha=_sha(meta.get("git_sha")),

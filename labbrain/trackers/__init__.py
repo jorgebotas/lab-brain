@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import fnmatch
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from labbrain.confighash import config_hash
-from labbrain.trackers.base import RunRecord, TrackerAdapter, TrackerError
+from labbrain.findings import sanitize
+from labbrain.trackers.base import RUN_ID_RE, RunRecord, TrackerAdapter, TrackerError
 from labbrain.vault import Config
 
 LATER_BACKENDS = frozenset({"wandb", "mlflow"})
@@ -25,6 +26,20 @@ def get_adapter(config: Config, root: Path) -> TrackerAdapter:
     if backend == "none":
         raise TrackerError("tracker backend 'none' is not supported by exp record yet")
     raise TrackerError("unknown tracker backend")
+
+
+def check_run_ids(run_ids: Sequence[str]) -> None:
+    """Refuse a run ID given twice (it would duplicate run_ids and metrics).
+
+    An ID that is not run-ID-shaped may be free text, so it is never echoed.
+    """
+    seen: set[str] = set()
+    for run_id in run_ids:
+        if run_id in seen:
+            if not RUN_ID_RE.fullmatch(run_id):
+                raise TrackerError("invalid run id")
+            raise TrackerError(sanitize(f"run {run_id} given more than once"))
+        seen.add(run_id)
 
 
 def headline(summary: Mapping[str, float], patterns: Iterable[str]) -> dict[str, float]:

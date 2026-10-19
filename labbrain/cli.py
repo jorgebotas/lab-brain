@@ -339,7 +339,12 @@ def cmd_config_hash(args: argparse.Namespace) -> int:
         data = load_run_config(args.file)
     except ValueError as exc:
         raise UsageError(str(exc)) from exc
-    print(config_hash(data, ignore))
+    try:
+        digest = config_hash(data, ignore)
+    except ValueError:
+        name = args.file.name
+        raise UsageError(f"run config {name} has keys that collide when flattened") from None
+    print(digest)
     return EXIT_OK
 
 
@@ -379,8 +384,9 @@ def cmd_brief(args: argparse.Namespace) -> int:
 
 
 def cmd_tracker_fetch(args: argparse.Namespace) -> int:
-    from labbrain.trackers import describe, get_adapter
+    from labbrain.trackers import check_run_ids, describe, get_adapter
 
+    check_run_ids(args.runs)
     root, config = _config(args)
     records = get_adapter(config, root).fetch(args.runs)
     print(json.dumps([describe(r, config) for r in records], indent=2, default=str))
@@ -405,9 +411,10 @@ def cmd_code_sha(args: argparse.Namespace) -> int:
 
 def cmd_tracker_diff(args: argparse.Namespace) -> int:
     from labbrain.experiments import config_diff, parent_run_ids, render_setup
-    from labbrain.trackers import get_adapter
+    from labbrain.trackers import check_run_ids, get_adapter
     from labbrain.vault import Vault
 
+    check_run_ids(args.runs)
     root, config = _config(args)
     vault = Vault.load(root, config)
     adapter = get_adapter(config, root)

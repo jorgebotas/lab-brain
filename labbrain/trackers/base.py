@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Any, Literal, Protocol, TypedDict
@@ -13,6 +14,7 @@ from labbrain.errors import EngineError
 
 RunStatus = Literal["running", "finished", "failed", "unknown"]
 RUN_STATUSES: tuple[str, ...] = ("running", "finished", "failed", "unknown")
+RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 class RunRecord(TypedDict):

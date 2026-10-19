@@ -325,8 +325,9 @@ def record(
 ) -> Path:
     """Create an experiment note from runs, or fill in a planned or running one."""
     from labbrain.scaffold import create, one_line
-    from labbrain.trackers import describe, get_adapter
+    from labbrain.trackers import check_run_ids, describe, get_adapter
 
+    check_run_ids(req.run_ids)
     vault = Vault.load(root, config)
     for note_id in [req.parent, *req.links]:
         if note_id and vault.get(note_id) is None:

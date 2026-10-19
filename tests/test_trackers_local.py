@@ -119,6 +119,30 @@ def test_missing_run_names_the_file(vault: Path) -> None:
         ({"config.yaml": "- 48151623\n"}, "config.yaml is not a mapping"),
         ({"config.yaml": "a: 1\n", "metrics.json": "{48151623"}, "metrics.json is not valid JSON"),
         ({"config.yaml": "a: 1\n", "meta.json": "[48151623]"}, "meta.json is not valid JSON"),
+        ({"config.yaml": "when: 2026-13-45\n"}, "config.yaml is not valid YAML"),
+        ({"config.yaml": "a: &x {b: *x}\n"}, "config.yaml is not valid YAML"),
+        ({"config.yaml": "a: " + "[" * 5000 + "]" * 5000}, "config.yaml is not valid YAML"),
+        ({"config.yaml": 'a: "x\\udc85"\n'}, "config.yaml is not valid YAML"),
+        (
+            {"config.yaml": "a: 1\n", "metrics.json": '{"m":' + "[" * 100000 + "]" * 100000 + "}"},
+            "metrics.json is not valid JSON",
+        ),
+        (
+            {"config.yaml": "a: 1\n", "metrics.json": '{"m\\udc85": 1}'},
+            "metrics.json is not valid JSON",
+        ),
+        (
+            {"config.yaml": "a: 1\n", "meta.json": '{"url": "x\\udc85"}'},
+            "meta.json is not valid JSON",
+        ),
+        (
+            {"config.yaml": "a.b: 48151623\na:\n  b: 2\n"},
+            "config.yaml has keys that collide when flattened",
+        ),
+        (
+            {"config.yaml": "a: 1\n", "metrics.json": '{"m.n": 48151623, "m": {"n": 2}}'},
+            "metrics.json has keys that collide when flattened",
+        ),
     ],
 )
 def test_unreadable_files_are_reported_without_content(
@@ -284,3 +308,34 @@ def test_unrelated_data_paths_do_not_block_reads(tmp_path: Path) -> None:
     root = make_vault(tmp_path / "v", MIN_CONFIG + f"data_paths: {paths}\n")
     copy_runs(root)
     assert adapter(root).fetch(["run-nometrics"])[0]["status"] == "unknown"
+
+
+def test_mixed_key_types_in_a_run_config_still_describe(tmp_path: Path) -> None:
+    root = make_vault(tmp_path / "v")
+    add_run(root, "r1", {"config.yaml": "layers: [{1: a, b: c}]\n"})
+    [rec] = adapter(root).fetch(["r1"])
+    assert describe(rec, load_config(root))["config_hash"].startswith("sha256:")
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["tracker", "fetch", "run-c1", "run-c2", "run-c1"],
+        ["tracker", "diff", "run-c1", "run-c1", "--parent", "EXP-20260910-label-smoothing"],
+    ],
+)
+def test_tracker_commands_refuse_duplicate_runs(
+    vault: Path, capsys: pytest.CaptureFixture[str], argv: list[str]
+) -> None:
+    assert main(["--vault", str(vault), *argv]) == 2
+    assert capsys.readouterr().err == "labbrain: run run-c1 given more than once\n"
+
+
+def test_duplicate_free_text_run_ids_are_not_echoed() -> None:
+    from labbrain.trackers import check_run_ids
+
+    name = "Jane" + " " + "Doe"
+    with pytest.raises(TrackerError) as info:
+        check_run_ids([name, name])
+    assert str(info.value) == "invalid run id"
+    check_run_ids(["run-c1", "run-c2"])

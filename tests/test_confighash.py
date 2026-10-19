@@ -54,3 +54,56 @@ def test_load_run_config_non_utf8_is_sanitized_value_error(tmp_path: Path) -> No
     with pytest.raises(ValueError) as info:
         load_run_config(tmp_path / "latin.yaml")
     assert str(info.value) == "cannot read run config latin.yaml"
+
+
+def test_normal_config_hashes_are_unchanged() -> None:
+    import hashlib
+
+    config = {"train": {"lr": 0.001, "epochs": 10}, "model": "resnet", "tags": ["a", "b"]}
+    flat = {"model": "resnet", "tags": ["a", "b"], "train.epochs": 10, "train.lr": 0.001}
+    payload = json.dumps(flat, sort_keys=True, separators=(",", ":"), default=str)
+    expected = "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    assert config_hash(config, []) == expected
+
+
+def test_mixed_key_types_inside_lists_still_hash() -> None:
+    mixed = {"layers": [{1: "a", "b": "c"}]}
+    assert config_hash(mixed, []).startswith("sha256:")
+    assert config_hash(mixed, []) == config_hash({"layers": [{"b": "c", 1: "a"}]}, [])
+    assert config_hash(mixed, []) != config_hash({"layers": [{1: "a", "b": "d"}]}, [])
+
+
+def test_flatten_refuses_colliding_keys() -> None:
+    with pytest.raises(ValueError, match="collide"):
+        flatten({"a.b": 999, "a": {"b": 2}})
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "when: 2026-13-45\n",
+        "a: &x {b: *x}\n",
+        "a: " + "[" * 5000 + "]" * 5000 + "\n",
+        'url: "x\\udc85"\n',
+    ],
+    ids=["impossible-date", "recursive-alias", "deep-nesting", "lone-surrogate"],
+)
+def test_load_run_config_refuses_odd_yaml(tmp_path: Path, text: str) -> None:
+    (tmp_path / "c.yaml").write_text(text)
+    with pytest.raises(ValueError) as info:
+        load_run_config(tmp_path / "c.yaml")
+    assert str(info.value) == "cannot read run config c.yaml"
+
+
+def test_config_hash_cli_refuses_colliding_keys(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from labbrain.cli import main
+
+    monkeypatch.delenv("LABBRAIN_VAULT", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "c.yaml").write_text("a.b: 999\na:\n  b: 2\n")
+    assert main(["config-hash", str(tmp_path / "c.yaml")]) == 2
+    err = capsys.readouterr().err
+    assert err == "labbrain: run config c.yaml has keys that collide when flattened\n"
+    assert "999" not in err

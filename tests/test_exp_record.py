@@ -491,3 +491,20 @@ def test_append_to_section_respects_fences_and_line_endings() -> None:
     assert append_to_section(crlf, "Setup", "Block.\n") == (
         "---\r\nid: x\r\n---\r\n## Setup\r\n\r\nBlock.\r\n\r\n## Results\r\n"
     )
+
+
+def test_a_lone_surrogate_in_meta_is_refused(
+    runs_vault: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    variant(runs_vault, "run-odd", meta='{"url": "https://example.org/x\\udc85"}')
+    code, _, err = record(capsys, "run-odd", "--author", "claude", "--title", "Odd meta")
+    assert code == 2 and err == "labbrain: run run-odd: meta.json is not valid JSON\n"
+    assert new_experiments(runs_vault) == []
+
+
+def test_duplicate_run_ids_are_refused(
+    runs_vault: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, _, err = record(capsys, "run-c1", "run-c1", "--author", "claude", "--title", "Twice")
+    assert code == 2 and err == "labbrain: run run-c1 given more than once\n"
+    assert new_experiments(runs_vault) == []

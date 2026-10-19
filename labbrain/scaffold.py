@@ -18,7 +18,7 @@ from labbrain.errors import EngineError
 from labbrain.findings import strip_controls
 from labbrain.ids import IdError, new_id, protocol_version
 from labbrain.layout import TYPE_FOLDERS
-from labbrain.notes import atomic_create, render_note
+from labbrain.notes import H2_RE, HEADING_RE, atomic_create, render_note
 from labbrain.schema import DEFAULT_STATUS, FUTURE_AGENTS_HEADING, REQUIRED_SECTIONS
 from labbrain.vault import Config
 
@@ -33,6 +33,8 @@ NEW_STATUSES: dict[str, tuple[str, ...]] = {
     "decision": ("proposed", "accepted"),
 }
 CREATE_ATTEMPTS = 5
+# `--body` goes under its own heading, so it never counts as For-future-agents lines.
+BODY_HEADING = "Notes"
 
 
 class ScaffoldError(EngineError):
@@ -46,6 +48,11 @@ def allowed_statuses(note_type: str) -> tuple[str, ...]:
 def one_line(text: str) -> str:
     """`text` on one line: control characters and line breaks become single spaces."""
     return " ".join(strip_controls(text).split())
+
+
+def _body_lines(body: str) -> list[str]:
+    """`body` split into lines, each with control characters replaced by spaces."""
+    return [strip_controls(line) for line in body.splitlines()]
 
 
 # Type-specific fields in display order. A list default renders as a flow list (`[]`).
@@ -134,8 +141,9 @@ def skeleton(
     if config.is_agent(author):
         line = one_line(summary) or FUTURE_AGENTS_PLACEHOLDER
         sections.append(f"## {FUTURE_AGENTS_HEADING}\n\n{line}\n")
-    if body.strip():
-        sections.append(body.strip("\n") + "\n")
+    text = "\n".join(_body_lines(body)).strip("\n")
+    if text.strip():
+        sections.append(f"## {BODY_HEADING}\n\n{text}\n")
     sections += [f"## {section}\n" for section in REQUIRED_SECTIONS[note_type]]
     return render_note(data, "\n".join(sections))
 
@@ -161,8 +169,10 @@ def create(
     if status is not None and status not in allowed_statuses(note_type):
         choices = ", ".join(allowed_statuses(note_type))
         raise ScaffoldError(f"--status for a new {note_type} must be one of: {choices}")
-    if any(line.startswith("## ") for line in body.splitlines()):
+    if any(H2_RE.match(line) for line in _body_lines(body)):
         raise ScaffoldError("--body must not contain level-2 headings")
+    if HEADING_RE.match(one_line(summary)):
+        raise ScaffoldError("--summary must not be a heading")
     agent = agent or author
     links, tags = list(links), list(tags)
     for _ in range(CREATE_ATTEMPTS):

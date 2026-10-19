@@ -9,6 +9,7 @@ YAML input.
 
 from __future__ import annotations
 
+import errno
 import io
 import os
 import re
@@ -414,21 +415,51 @@ def atomic_write(path: Path, text: str) -> None:
         raise
 
 
+# os.link errnos meaning "this filesystem cannot hard-link", not "the target exists".
+_NO_HARD_LINKS = frozenset(
+    code
+    for name in ("EPERM", "ENOTSUP", "EOPNOTSUPP", "EXDEV", "EMLINK", "ENOSYS")
+    if (code := getattr(errno, name, None)) is not None
+)
+
+
 def atomic_create(path: Path, text: str) -> None:
     """Like atomic_write, but never replace a file: raise FileExistsError instead.
 
     The text is written to a temp file and hard-linked into place, so the note appears
     complete or not at all, and two writers racing for one ID cannot overwrite each other.
+    Where the filesystem has no hard links, an exclusive create is used instead: it still
+    never replaces a file, but a crash mid-write can leave a partial note.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    mode = _target_mode(path)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)
-        os.chmod(tmp, _target_mode(path))
-        os.link(tmp, path)
+        os.chmod(tmp, mode)
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            raise
+        except OSError as exc:
+            if exc.errno not in _NO_HARD_LINKS:
+                raise
+            _exclusive_write(path, text, mode)
     finally:
         Path(tmp).unlink(missing_ok=True)
+
+
+def _exclusive_write(path: Path, text: str, mode: int) -> None:
+    """Create `path` with O_EXCL (FileExistsError if it exists) and write text verbatim."""
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
+    fd = os.open(path, flags, mode)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+    except BaseException:
+        path.unlink(missing_ok=True)  # O_EXCL made this file ours; leave no partial note
+        raise
 
 
 def update_frontmatter(path: Path, updates: Mapping[str, Any]) -> bool:

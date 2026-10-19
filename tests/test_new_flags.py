@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
+import errno
+import os
+import stat
 from pathlib import Path
 
 import pytest
 
-from labbrain import scaffold
+from labbrain import notes, scaffold
 from labbrain.cli import main
-from labbrain.notes import atomic_create
+from labbrain.index import summary
+from labbrain.notes import atomic_create, parse_note
+
+BODY = (
+    "Warmup steadies early training. It may help the small model.\n"
+    "Try a linear ramp first.\n"
+    "Then compare against no warmup."
+)
 
 
 @pytest.fixture(autouse=True)
@@ -65,7 +75,7 @@ def test_summary_is_ignored_for_human_authors(
     assert "Try warmup." not in Path(out.strip()).read_text(encoding="utf-8")
 
 
-def test_body_goes_after_the_future_agents_block(
+def test_body_goes_under_its_own_heading_after_the_future_agents_block(
     vault_dir: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     path = new(
@@ -78,11 +88,12 @@ def test_body_goes_after_the_future_agents_block(
         "--summary",
         "Warmup idea.",
         "--body",
-        "Don't forget cosine warmup.",
+        BODY,
     )
     text = path.read_text(encoding="utf-8")
-    assert text.index("## For future agents") < text.index("Don't forget cosine warmup.\n")
-    assert run(capsys, "validate", str(path))[0] == 0
+    assert f"## For future agents\n\nWarmup idea.\n\n## Notes\n\n{BODY}\n" in text
+    assert run(capsys, "validate", str(path)) == (0, "0 error(s), 0 warning(s), 0 info\n", "")
+    assert summary(parse_note(path, vault_dir)) == "Warmup steadies early training."
 
 
 def test_body_goes_before_required_sections(
@@ -99,7 +110,8 @@ def test_body_goes_before_required_sections(
         "Background note.",
     )
     text = path.read_text(encoding="utf-8")
-    assert text.index("Background note.") < text.index("## Context")
+    assert "## Notes\n\nBackground note.\n" in text
+    assert text.index("## Notes") < text.index("## Context")
     assert run(capsys, "validate", str(path))[0] == 0
 
 
@@ -119,6 +131,42 @@ def test_body_rejects_level_two_headings(
     )
     assert code == 2 and "level-2 headings" in err
     assert not list((vault_dir / "ideas" / "inbox").glob("IDEA-20261015-*"))
+
+
+def test_body_rejects_tab_separated_level_two_headings(
+    vault_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, _, err = run(
+        capsys, "new", "idea", "--title", "Sneaky", "--author", "claude", "--body", "x\n##\tContext"
+    )
+    assert code == 2 and "level-2 headings" in err
+    assert not list((vault_dir / "ideas" / "inbox").glob("IDEA-20261015-*"))
+
+
+def test_summary_must_not_be_a_heading(vault_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    code, _, err = run(
+        capsys, "new", "idea", "--title", "Sneaky", "--author", "claude", "--summary", "## Notes"
+    )
+    assert code == 2 and "--summary must not be a heading" in err
+    assert not list((vault_dir / "ideas" / "inbox").glob("IDEA-20261015-*"))
+
+
+def test_body_control_characters_are_stripped_but_line_breaks_kept(
+    vault_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = new(
+        capsys,
+        "idea",
+        "--title",
+        "Cosine warmup",
+        "--author",
+        "alice",
+        "--body",
+        "first\x1b[31m line\nsecond line",
+    )
+    text = path.read_text(encoding="utf-8")
+    assert "\x1b" not in text
+    assert "## Notes\n\nfirst [31m line\nsecond line\n" in text
 
 
 def test_tags_are_deduplicated_in_order(
@@ -196,6 +244,57 @@ def test_atomic_create_writes_a_new_file(tmp_path: Path) -> None:
     target = tmp_path / "sub" / "note.md"
     atomic_create(target, "line\r\n")
     assert target.read_bytes() == b"line\r\n"
+    assert stat.S_IMODE(target.stat().st_mode) == _default_mode()
+
+
+def _default_mode() -> int:
+    umask = os.umask(0)
+    os.umask(umask)
+    return 0o666 & ~umask
+
+
+def _no_hard_links(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(src: object, dst: object) -> None:
+        raise OSError(errno.EPERM, "hard links not supported")
+
+    monkeypatch.setattr(notes.os, "link", refuse)
+
+
+def test_atomic_create_falls_back_without_hard_links(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_hard_links(monkeypatch)
+    target = tmp_path / "sub" / "note.md"
+    atomic_create(target, "line\r\nnext\n")
+    assert target.read_bytes() == b"line\r\nnext\n"
+    assert stat.S_IMODE(target.stat().st_mode) == _default_mode()
+    assert [p.name for p in target.parent.iterdir()] == ["note.md"]
+
+
+def test_atomic_create_fallback_never_replaces_a_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_hard_links(monkeypatch)
+    target = tmp_path / "note.md"
+    target.write_text("original", encoding="utf-8")
+    with pytest.raises(FileExistsError):
+        atomic_create(target, "new text")
+    assert target.read_text(encoding="utf-8") == "original"
+    assert [p.name for p in tmp_path.iterdir()] == ["note.md"]
+
+
+def test_atomic_create_propagates_other_link_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(src: object, dst: object) -> None:
+        raise OSError(errno.EIO, "disk on fire")
+
+    monkeypatch.setattr(notes.os, "link", broken)
+    target = tmp_path / "note.md"
+    with pytest.raises(OSError) as info:
+        atomic_create(target, "text")
+    assert info.value.errno == errno.EIO
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_create_retries_when_another_writer_wins(

@@ -338,6 +338,33 @@ CASES: list[tuple[str, str, str]] = [
     ("r27a-append-redirect", "X=../mnt/p; X+=hi 2>/dev/null; cat $X/rows.csv", "deny"),
     ("r27a-redirect-first", "X=../mnt/p; >/dev/null X+=hi; cat $X/rows.csv", "deny"),
     ("r27a-braced", "X=../mnt; X+=/p 2>/dev/null; cat ${{X}}hi/rows.csv", "deny"),
+    # --- ruling R27(b): special and positional parameters next to path text are WILD
+    ("r27b-at", "cat ../mnt/p$@hi/rows.csv", "deny"),
+    ("r27b-one", "cat ../mnt/p$1hi/rows.csv", "deny"),
+    ("r27b-sh-c", "sh -c 'cat ../mnt/p$@hi/rows.csv'", "deny"),
+    ("r27b-sh-c-dquote", 'sh -c "cat ../mnt/p$1hi/rows.csv"', "deny"),
+    ("r27b-braced-at", "cat ../mnt/p${{@}}hi/rows.csv", "deny"),
+    ("r27b-braced-n", "cat ../mnt/p${{10}}hi/rows.csv", "deny"),
+    ("r27b-star", "cat ../mnt/p$*hi/rows.csv", "deny"),
+    ("r27b-braced-star", "cat ../mnt/p${{*}}hi/rows.csv", "deny"),
+    ("r27b-star-alone", 'IFS=; set -- ../mnt/p hi/rows.csv; cat "${{*}}"', "deny"),
+    ("r27b-zero", "cat ../mnt/p$0hi/rows.csv", "deny"),
+    ("r27b-status", "cat ../mnt/p$?hi/rows.csv", "deny"),
+    ("r27b-pid", "cat ../mnt/p$$hi/rows.csv", "deny"),
+    ("r27b-flags", "cat ../mnt/p${{-}}hi/rows.csv", "deny"),
+    ("r27b-heredoc", "cat <<EOF\n../mnt/p$1hi/rows.csv\nEOF", "deny"),
+    # a word of positional parameters alone, but joined: `$1$2`, "$*" (IFS), "$0$1"
+    ("r27b-concat", "set -- ../mnt/p hi/rows.csv; cat $1$2", "deny"),
+    ("r27b-ifs-star", 'IFS=; set -- ../mnt/p hi/rows.csv; cat "$*"', "deny"),
+    ("r27b-sh-c-args", "sh -c 'cat \"$0$1\"' ../mnt/p hi/rows.csv", "deny"),
+    ("r27b-program-zero", "sh -c '$0 -p hi' claude", "deny"),  # a positional runs a word
+    ("r27b-program-at", "sh -c '\"$@\"' _ claude -p hi", "deny"),
+    ("r27b-mark-spelled", "cat \ue006/rows.csv", "deny"),  # the pre-pass's own mark
+    ("r27b-mark-spelled-var", "cat \ue000X\ue001", "deny"),
+    ("r27b-function-arg", 'f() {{ cat "$1"; }}; f notes.txt', "allow"),
+    ("r27b-exit-status", 'python train.py; echo "exit: $?"; rc=$?; echo $rc $$', "allow"),
+    ("r27b-arg-alone", "sh -c 'echo \"$1\"' _ hello", "allow"),
+    ("r27b-args-alone", "sh -c 'ls \"$@\"' _ src docs", "allow"),
     # --- everyday commands that must keep working
     ("script", "python train.py --config configs/a.yaml", "allow"),
     ("ls-parent", "ls {tmp}/mnt", "allow"),

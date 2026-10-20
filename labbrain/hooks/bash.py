@@ -307,6 +307,16 @@ _SEPARATORS = set(";|()&\n")
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _ASSIGN = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)(\+?)=")
 _SPECIAL = set("?#$!@*-0123456789")
+# Ruling R27b: special parameters. `$? $# $$ $! $-` are digits or option letters: the
+# pre-pass marks them _NUMERIC. `$0`-`$9`, `${n}` and `$@` each hold one word of the command
+# (or WILD): marked _POSITIONAL. `$*` joins them all with IFS: WILD. `_params` resolves the
+# marks of each word once it is lexed.
+_NUMERIC = "\ue005"
+_POSITIONAL = "\ue006"
+_NUMERIC_PARAMS = frozenset("?#$!-")
+_PARAM_MARK = re.compile(f"[{_NUMERIC}{_POSITIONAL}]")
+_NOT_PATH_TEXT = frozenset(" \t\r\n=:,") | {_NUMERIC}  # may sit next to a numeric mark
+_MARKS = re.compile("[\ue000-\ue006]")  # the pre-pass's own marks: never in a command
 # Ruling R19b: a whole-word `"$(cat <<'EOF' … EOF)"` stands for its literal heredoc body;
 # the pre-pass marks it _VAR _LOCAL k _END, which _Check.parse renumbers _VAR _LIT k _END.
 _LOCAL = "\ue004"
@@ -483,8 +493,12 @@ def _expansion(
         content = text[i + 2 : j]
         if _NAME.fullmatch(content):
             out.append(_VAR + content + _END)
-        elif len(content) == 1 and content in _SPECIAL or content.isdigit():
-            out.append("_")
+        elif len(content) == 1 and content in _NUMERIC_PARAMS:
+            out.append(_NUMERIC)
+        elif content == "@" or (content.isascii() and content.isdigit()):
+            out.append(_POSITIONAL)
+        elif content == "*":
+            out.append(WILD)
         else:  # ${X:-…}, ${#X}, ${X/a/b}…: the value is not known
             out.append(WILD)
             nested.append(content)
@@ -502,8 +516,8 @@ def _expansion(
     if match:
         out.append(_VAR + match.group() + _END)
         return match.end(), True
-    if nxt and nxt in _SPECIAL:  # $? $# $$ $! $0-$9 $@ $* $-: not paths
-        out.append("_")
+    if nxt and nxt in _SPECIAL:  # $? $# $$ $! $- / $0-$9 $@ / $*: see _params
+        out.append(_NUMERIC if nxt in _NUMERIC_PARAMS else WILD if nxt == "*" else _POSITIONAL)
         return i + 2, True
     out.append("$")
     return i + 1, True
@@ -976,6 +990,11 @@ class _Check:
         bindings: dict[str, list[str]] = {}
         nested = list(scanned.nested)
         for words, targets in _simple_commands(tokens):
+            programs = {view.pos for view in _views(words)}  # `$0 -p hi` runs a word: WILD
+            words = [
+                WILD if k in programs and word == _POSITIONAL else _params(word)
+                for k, word in enumerate(words)
+            ]
             simple = self._simple(words, bindings, targets)
             if literal_form:
                 self.literal_forms.add(len(self.simples))
@@ -1181,7 +1200,7 @@ class _Check:
         exempt_runs = sum(len(simple.exempt) for simple in self.simples)
         for body, bindings in self.raw:
             for run in path_runs(body):
-                for alternative in self._expand(run, bindings):
+                for alternative in self._expand(_params(run), bindings):
                     for piece, whole in self._pieces(alternative):
                         if not piece:
                             continue
@@ -1611,6 +1630,30 @@ class _Check:
 _readings = readings  # ruling R22's two readings, under the name this module has used
 
 
+def _params(word: str) -> str:
+    """Ruling R27b: `word` (lexed, or a raw-text run) with its special-parameter marks
+    resolved to `_` (no path can come of it) or WILD.
+
+    A positional parameter alone (`$1`, `"$@"`) holds one word of the command, which is a
+    candidate in its own right: `_`. Joined to anything, another parameter included
+    (`$1$2`), it is WILD. A numeric one (digits or option letters) is `_` unless path text
+    is next to it: anything but blanks, `=`, `:`, `,` or another numeric parameter."""
+    if _NUMERIC not in word and _POSITIONAL not in word:
+        return word
+    if word == _POSITIONAL:
+        return "_"
+    last = len(word) - 1
+
+    def resolve(match: re.Match[str]) -> str:
+        k = match.start()
+        if match.group() == _POSITIONAL:
+            return WILD
+        near = (word[k - 1] if k else " ", word[k + 1] if k < last else " ")
+        return "_" if all(c in _NOT_PATH_TEXT for c in near) else WILD
+
+    return _PARAM_MARK.sub(resolve, word)
+
+
 def _delimited(word: str, text: str, *, loose: bool = False) -> bool:
     """Whether `word` occurs in `text` with no letter, digit or `_` around it, nor (unless
     `loose`) `.` or `-`."""
@@ -1703,6 +1746,8 @@ def check_command(
     """
     if not scope.protected and not scope.targets.roots:
         return None
+    if _MARKS.search(command):  # a mark spelled in the command could pass for an expansion
+        return Denial("data-guard", UNCONFIDENT_MESSAGE)
     try:
         return _Check(command, cwd, scope, env, session_id).run()
     except (_Unconfident, OSError, RuntimeError, ValueError, RecursionError):

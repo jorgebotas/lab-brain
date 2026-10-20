@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import getpass
 import secrets
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -469,9 +470,31 @@ def test_glob_non_ascii_root(world: World) -> None:
     write(straße, "rows.csv", f"{world.sentinel}\n")
     (world.vault / ".labbrain" / "config.yaml").write_text(protected_config(straße))
     entry = (1, str(straße))
-    for pattern in ("stra?e/*", "stra[ß]e/*", "straße/*", "STRASSE/*", "stras?e/*", "*ß*/*"):
+    for pattern in (
+        "stra?e/*",
+        "stra[ß]e/*",
+        "straße/*",
+        "STRASSE/*",
+        "stras?e/*",
+        "*ß*/*",
+        "STRA?E/*",  # case and a length-changing fold at once
+        "Stra?e/*",
+        "STRA[ß]E/*",
+    ):
         denied(world, "Glob", {"pattern": pattern, "path": str(world.tmp)}, entry=entry)
     allowed(world, "Glob", {"pattern": "stra?x/*", "path": str(world.tmp)})
+
+
+def test_glob_root_stored_nfd(world: World) -> None:
+    """A root configured NFC whose directory is spelled NFD on disk is matched in both forms."""
+    nfc, nfd = unicodedata.normalize("NFC", "café"), unicodedata.normalize("NFD", "café")
+    write(world.tmp / nfd, "rows.csv", f"{world.sentinel}\n")
+    root = world.tmp / nfc
+    (world.vault / ".labbrain" / "config.yaml").write_text(protected_config(root))
+    entry = (1, str(root))
+    for pattern in ("caf??/*", "caf?/*", "cafe?/*", f"{nfd}/*", "CAF??/*"):
+        denied(world, "Glob", {"pattern": pattern, "path": str(world.tmp)}, entry=entry)
+    allowed(world, "Glob", {"pattern": "caf???/*", "path": str(world.tmp)})
 
 
 def test_mcp_cannot_touch_guard_files(world: World) -> None:
@@ -497,18 +520,38 @@ def test_mcp_embedded_relative_path_denied(world: World) -> None:
     ):
         denied(world, "mcp__duckdb__query", {"sql": sql})
     allowed(world, "mcp__duckdb__query", {"sql": "SELECT 1.5 FROM 'notes/n.md' -- e.g. ok"})
+    # R17: a non-delimiter prefix stuck to the path.
+    for text in (
+        "file:../phi/rows.csv",
+        "SELECT * FROM [../phi/rows.csv]",
+        "see @../phi/rows.csv",
+        "x=$HOME:{../phi/rows.csv}",
+        "glob *+../phi/rows.csv",
+    ):
+        denied(world, "mcp__x__y", {"q": text})
+    allowed(world, "mcp__x__y", {"q": "file:notes/n.md [notes/n.md] a:b"})
     assert guard.PATHLIKE.findall("a '../phi/x' b=~/y c(./z)") == ["../phi/x", "~/y", "./z"]
 
 
 def test_mcp_over_length_path_denied(world: World) -> None:
     (world.vault / "linked").symlink_to(world.phi, target_is_directory=True)
-    for path in ("./" * 3000 + "../phi/rows.csv", "./" * 3000 + "linked/rows.csv"):
+    (world.phi / "sub").mkdir()
+    (world.vault / "lnksub").symlink_to(world.phi / "sub", target_is_directory=True)
+    pad = "./" * 3000
+    for path in (
+        pad + "../phi/rows.csv",
+        pad + "linked/rows.csv",
+        # `..` after a link climbs from the link's target, so it must never be collapsed as text.
+        pad + "linked/../phi/rows.csv",
+        pad + "lnksub/../rows.csv",
+    ):
         denied(world, "mcp__fs__read", {"path": path})
         denied(world, "mcp__db__q", {"sql": f"SELECT * FROM '{path}'"})  # embedded too
     # Still over the cap once normalised, and path-like: unsure.
     denied(world, "mcp__fs__read", {"path": "/".join(["d" * 200] * 30)})
     allowed(world, "mcp__fs__read", {"text": "word " * 2000})  # long, but nothing path-like
     allowed(world, "mcp__fs__read", {"path": "./" * 3000 + "notes/n.md"})
+    denied(world, "mcp__fs__read", {"path": "./" * 3000 + "notes/../notes/n.md"})  # `..`: unsure
     # Too many distinct path-like substrings to check in one call: unsure.
     denied(world, "mcp__fs__read", {"text": " ".join(f"a{i}.md" for i in range(6000))})
     allowed(world, "mcp__fs__read", {"text": " ".join(f"a{i}.md" for i in range(1000))})

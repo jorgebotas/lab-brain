@@ -12,8 +12,9 @@ from __future__ import annotations
 import os
 import pwd
 import re
+import unicodedata
 from collections.abc import Iterable, Mapping
-from fnmatch import fnmatchcase
+from fnmatch import fnmatchcase, translate
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +59,9 @@ MAX_CANDIDATES = 5000  # more distinct path candidates than this in one call: de
 # on `_DELIMITERS` and `fullmatch`es each token instead, which yields the same substrings.
 PATHLIKE = re.compile(r"""[^\s'"`()<>;|&=,]*[/~.][^\s'"`()<>;|&=,]*""")
 _DELIMITERS = re.compile(r"""[\s'"`()<>;|&=,]+""")
+# A path-like token is also split here (R17), so a prefix stuck to a path (`file:../x`,
+# `[../x]`) does not hide it; pieces with `/`, or starting with `~` or `.`, are candidates.
+_STICKY = re.compile(r"[:\[\]{}@!$%^*+?]+")
 
 # A tool name goes into the message: anything outside this set is replaced, length capped.
 _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9_.:-]+")
@@ -210,11 +214,24 @@ def _may_reach(rest: tuple[str, ...], prefix: Path, root: ProtectedRoot) -> bool
     names = root.path.parts[len(prefix.parts) :]
     if len(rest) < len(names):
         return False  # every match lies above the root
-    # Raw and folded: folding can change a name's length (ß -> ss), which breaks `?` and `[]`.
-    return all(
-        fnmatchcase(name, part) or fnmatchcase(fold(name), fold(part))
-        for name, part in zip(names, rest, strict=False)
-    )
+    return all(_component_matches(name, part) for name, part in zip(names, rest, strict=False))
+
+
+def _component_matches(name: str, part: str) -> bool:
+    """Whether Glob component `part` could match directory name `name`, over-approximated.
+
+    Raw, folded, and case-insensitively in NFC and NFD: folding can change a name's length
+    (ß -> ss), which breaks `?` and `[]`, and a name may be stored NFD on disk.
+    """
+    if fnmatchcase(name, part) or fnmatchcase(fold(name), fold(part)):
+        return True
+    forms = ("NFC", "NFD")
+    names = {unicodedata.normalize(form, name) for form in forms}
+    for pattern in {part, *(unicodedata.normalize(form, part) for form in forms)}:
+        regex = re.compile(translate(pattern), re.IGNORECASE)
+        if any(regex.fullmatch(n) for n in names):
+            return True
+    return False
 
 
 def _expand_home(text: str, env: Mapping[str, str]) -> str:
@@ -278,17 +295,22 @@ def _strings(tool_input: dict[str, Any]) -> list[str]:
 def _paths(text: str, cwd: Path, env: Mapping[str, str]) -> list[Path]:
     """The canonical paths candidate `text` may name.
 
-    A candidate over the cap is checked truncated and, normalised in full, as joined to cwd
-    (so `./` padding cannot push a path past the cap); still over the cap and containing a
-    `/`, it is unsure.
+    A candidate over the cap is checked truncated and also in full, joined to cwd with only
+    `.` and empty components removed (so `./` padding cannot push a path past the cap). `..`
+    is never collapsed as text, because the system resolves a link before climbing from it:
+    a long candidate with a `..` component, or still over the cap, is unsure. A long single
+    component, with no separator, cannot name a file and needs nothing more.
     """
     paths = [_canon(text[:MAX_STRING], cwd)]
     if len(text) > MAX_STRING:
-        full = os.path.normpath(os.path.join(str(cwd), _expand_home(text, env)))
-        if len(full) <= MAX_STRING:
-            paths.append(_canon(full, cwd))
-        elif "/" in text:
+        expanded = _expand_home(text, env)
+        if os.sep not in expanded:
+            return paths
+        parts = [p for p in os.path.join(str(cwd), expanded).split(os.sep) if p not in ("", ".")]
+        compact = os.sep + os.sep.join(parts)
+        if ".." in parts or len(compact) > MAX_STRING:
             raise _Unsure
+        paths.append(_canon(compact, cwd))
     return paths
 
 
@@ -302,7 +324,14 @@ def _any_tool(args: dict[str, Any], cwd: Path, scope: Scope, subject: str) -> De
         if root is not None:
             return data_denial(root, subject)
         candidates.add(text)
-        candidates.update(t for t in _DELIMITERS.split(text) if PATHLIKE.fullmatch(t))
+        for token in _DELIMITERS.split(text):
+            if PATHLIKE.fullmatch(token):
+                candidates.add(token)
+                candidates.update(
+                    piece
+                    for piece in _STICKY.split(token)
+                    if os.sep in piece or piece.startswith(("~", "."))
+                )
         if len(candidates) > MAX_CANDIDATES:
             raise _Unsure
     paths = [path for text in candidates for path in _paths(text, cwd, scope.env)]

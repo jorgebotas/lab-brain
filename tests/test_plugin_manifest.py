@@ -55,7 +55,7 @@ def test_manifests_agree_with_pyproject() -> None:
     plugin, market = manifest("plugin.json"), manifest("marketplace.json")
     project = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     assert plugin["name"] == market["name"] == "lab-brain"
-    assert plugin["version"] == project["version"] == __version__ == "0.2.0"
+    assert plugin["version"] == project["version"] == __version__ == "0.3.0"
     assert plugin["license"] == project["license"]
     assert plugin["author"]["name"] == project["authors"][0]["name"] == market["owner"]["name"]
     assert market["description"].strip()

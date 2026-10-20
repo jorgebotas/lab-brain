@@ -1,6 +1,6 @@
 [project]
 name = "labbrain"
-version = "0.2.0"
+version = "0.3.0"
 description = "Deterministic core of lab-brain: schemas, IDs, validation, lint and PHI scanning for ML research vaults"
 readme = "README.md"
 requires-python = ">=3.11"

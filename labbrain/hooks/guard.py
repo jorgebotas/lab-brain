@@ -185,11 +185,51 @@ def _grep(args: dict[str, Any], cwd: Path, scope: Scope, subject: str) -> Denial
 
 
 def _glob(args: dict[str, Any], cwd: Path, scope: Scope, subject: str) -> Denial | None:
+    """Glob is ripgrep (`rg --files --glob <pattern>` from `path`), with gitignore matching:
+    a pattern with no `/` but a trailing one matches at any depth, and a leading `/` anchors
+    it at the search root. Every reading the pattern may have is checked."""
     pattern = args.get("pattern")
     if not isinstance(pattern, str):
         raise _Unsure
-    pattern = _expand_home(pattern, scope.env)
-    parts = (_start(args, cwd) / pattern).parts
+    base = _start(args, cwd)
+    expanded = _expand_home(_negations(pattern), scope.env)
+    if os.sep not in expanded.rstrip(os.sep):
+        readings = [base / "**" / expanded]  # matches at any depth below the search root
+    elif expanded.startswith(os.sep):
+        readings = [Path(expanded), base / expanded.lstrip(os.sep)]  # absolute, or anchored
+    else:
+        readings = [base / expanded]
+    for reading in readings:
+        root = _glob_reading(reading.parts, cwd, scope)
+        if root is not None:
+            return data_denial(root, subject)
+    return None
+
+
+def _negations(pattern: str) -> str:
+    """`pattern` with each class opened by `[^` rewritten to `[!` (R18): globset negates with
+    either, while fnmatch reads `[^x]` as the class of `^` and `x`."""
+    out: list[str] = []
+    i = 0
+    while i < len(pattern):
+        j = i + 1
+        if pattern[i] == "[":
+            j += pattern[j : j + 1] in ("!", "^")
+            j += pattern[j : j + 1] == "]"  # a `]` first in a class is literal
+            end = pattern.find("]", j)
+            if end != -1:
+                body = pattern[i + 1 : end]
+                out.append("[" + ("!" + body[1:] if body.startswith("^") else body) + "]")
+                i = end + 1
+                continue
+            j = i + 1
+        out.append(pattern[i:j])
+        i = j
+    return "".join(out)
+
+
+def _glob_reading(parts: tuple[str, ...], cwd: Path, scope: Scope) -> ProtectedRoot | None:
+    """The root the absolute glob `parts` could match inside, or None."""
     cut = next((i for i, part in enumerate(parts) if GLOB_SPECIAL & set(part)), len(parts))
     prefix = _canon(str(Path(*parts[:cut])), cwd)
     rest = parts[cut:]
@@ -197,10 +237,10 @@ def _glob(args: dict[str, Any], cwd: Path, scope: Scope, subject: str) -> Denial
         raise _Unsure
     root = scope.targets.containing(prefix)
     if root is not None:
-        return data_denial(root, subject)
+        return root
     for root in scope.targets.under(prefix):
         if _may_reach(rest, prefix, root):
-            return data_denial(root, subject)
+            return root
     return None
 
 

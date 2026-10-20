@@ -233,7 +233,8 @@ def test_glob_star_star_from_ancestor_denied(world: World) -> None:
 
 
 def test_glob_shallow_from_ancestor_allowed(world: World) -> None:
-    allowed(world, "Glob", {"pattern": "*.md", "path": str(world.tmp)})
+    allowed(world, "Glob", {"pattern": "vault/*.md", "path": str(world.tmp)})
+    allowed(world, "Glob", {"pattern": "/vault/*.md", "path": str(world.tmp)})  # anchored
     allowed(world, "Glob", {"pattern": "vault/**/*.md", "path": str(world.tmp)})
     allowed(world, "Glob", {"pattern": "x*/*.csv", "path": str(world.tmp)})
     allowed(world, "Glob", {"pattern": "**/*.md"})
@@ -442,7 +443,8 @@ def test_home_relative_root(world: World, monkeypatch: pytest.MonkeyPatch) -> No
         denied(world, "mcp__x__y", {"q": text}, entry=entry)
     denied(world, "Glob", {"pattern": "~/deep/*/x.csv"}, entry=entry)
     denied(world, "Glob", {"pattern": "*/*", "path": str(world.home)}, entry=entry)
-    allowed(world, "Glob", {"pattern": "*", "path": str(world.home)})  # stops above the root
+    allowed(world, "Glob", {"pattern": "*/*.csv", "path": str(world.home)})  # beside the root
+    allowed(world, "Glob", {"pattern": "/d*", "path": str(world.home)})  # above the root
     denied(world, "Glob", {"pattern": f"~nosuchuser{secrets.token_hex(4)}/*"}, entry=entry)
     for tool, args in (
         ("Glob", {"path": str(world.home)}),
@@ -483,6 +485,30 @@ def test_glob_non_ascii_root(world: World) -> None:
     ):
         denied(world, "Glob", {"pattern": pattern, "path": str(world.tmp)}, entry=entry)
     allowed(world, "Glob", {"pattern": "stra?x/*", "path": str(world.tmp)})
+
+
+def test_glob_caret_negation(world: World) -> None:
+    """R18: `[^x]` negates, as in ripgrep's globset, not a class of `^` and `x` as in fnmatch."""
+    for pattern in ("p[^x]i/*", "P[^x]I/*"):
+        denied(world, "Glob", {"pattern": pattern, "path": str(world.tmp)})
+    allowed(world, "Glob", {"pattern": "p[^h]i/*", "path": str(world.tmp)})  # excludes the h
+    straße = world.tmp / "straße"
+    straße.mkdir()
+    (world.vault / ".labbrain" / "config.yaml").write_text(protected_config(straße))
+    denied(
+        world, "Glob", {"pattern": "stra[^x]e/*", "path": str(world.tmp)}, entry=(1, str(straße))
+    )
+    assert guard._negations("a[^x]b[!y][^]z][[^]c[^") == "a[!x]b[!y][!]z][[^]c[^"
+
+
+def test_glob_gitignore_readings(world: World) -> None:
+    """The Glob tool is `rg --files --glob`: a pattern without `/` matches at any depth, and a
+    leading `/` anchors it at the search root."""
+    for pattern in ("*.csv", "rows.csv", "phi", "*.md", "phi/", "r?ws.*"):
+        denied(world, "Glob", {"pattern": pattern, "path": str(world.tmp)})
+    denied(world, "Glob", {"pattern": "/phi/*", "path": str(world.tmp)})  # anchored at path
+    allowed(world, "Glob", {"pattern": "*.csv", "path": str(world.vault)})  # nothing below
+    allowed(world, "Glob", {"pattern": "/notes/*.md", "path": str(world.vault)})
 
 
 def test_glob_root_stored_nfd(world: World) -> None:

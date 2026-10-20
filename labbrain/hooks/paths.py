@@ -22,16 +22,25 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+def _joined(p: Path | str, base: Path | None) -> Path:
+    """`p` with a leading `~` or `~user` expanded, then joined to `base` when relative.
+
+    Ruling R15: an unknown `~user` is left as written, a relative name, as the shell leaves
+    it. A NUL byte raises `ValueError`.
+    """
+    path = Path(os.path.expanduser(os.fspath(p)))
+    if not path.is_absolute() and base is not None:
+        path = base / path
+    return path
+
+
 def canonical(p: Path | str, base: Path | None = None) -> Path:
     """`p` with `~` expanded, joined to `base` when relative, and resolved (symlinks, `..`).
 
-    The path need not exist. Errors (an unknown `~user`, a NUL byte, a symlink loop) are
-    left to the caller: on the PreToolUse path they deny.
+    The path need not exist. An unknown `~user` is a relative name (R15). Errors (a NUL
+    byte, a symlink loop) are left to the caller: on the PreToolUse path they deny.
     """
-    path = Path(p).expanduser()
-    if not path.is_absolute() and base is not None:
-        path = base / path
-    return path.resolve(strict=False)
+    return _joined(p, base).resolve(strict=False)
 
 
 def spellings(p: Path | str, base: Path | None = None) -> tuple[Path, ...]:
@@ -40,9 +49,7 @@ def spellings(p: Path | str, base: Path | None = None) -> tuple[Path, ...]:
     The own spelling is the path with every component but the last resolved, so it names
     the link itself. Errors propagate as for `canonical`.
     """
-    path = Path(p).expanduser()
-    if not path.is_absolute() and base is not None:
-        path = base / path
+    path = _joined(p, base)
     full = path.resolve(strict=False)
     if path.name in ("", ".", ".."):
         return (full,)

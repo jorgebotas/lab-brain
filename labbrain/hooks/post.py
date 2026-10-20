@@ -36,7 +36,7 @@ def post_tool_use(payload: Payload, env: Mapping[str, str]) -> tuple[int, str]:
         return 0, ""
     try:
         target = canonical(raw, payload.cwd)
-    except (OSError, ValueError, RuntimeError):  # NUL byte, unknown ~user, symlink loop
+    except (OSError, ValueError, RuntimeError):  # NUL byte, symlink loop
         return 0, ""  # no such file can have been written
     root = vault_of(target)
     if root is None:

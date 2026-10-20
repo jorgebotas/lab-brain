@@ -151,9 +151,19 @@ def test_read_outside_root_allowed(world: World) -> None:
 
 
 def test_unconfident_path_denied(world: World) -> None:
-    denied(world, "Read", {"file_path": f"~nosuchuser{secrets.token_hex(4)}/rows.csv"})
     denied(world, "Read", {"file_path": str(world.vault / "a\0b")})
     denied(world, "Read", {"file_path": ["not", "a", "string"]})
+
+
+def test_unknown_user_is_a_relative_name(world: World) -> None:
+    """Ruling R15: an unknown `~user` is a relative name, judged like any other."""
+    user = f"~nosuchuser{secrets.token_hex(4)}"
+    allowed(world, "Read", {"file_path": f"{user}/rows.csv"})
+    allowed(world, "mcp__x__y", {"q": "about ~5 minutes"})
+    allowed(world, "mcp__x__y", {"q": f"see {user}/x and ~5/y"})
+    denied(world, "Read", {"file_path": f"{user}/../../phi/rows.csv"})
+    denied(world, "mcp__x__y", {"q": f"about {user}/../../phi/rows.csv"})
+    denied(world, "mcp__x__y", {"q": "about ~5/../../phi/rows.csv"})
 
 
 def test_write_and_edit_into_root_denied(world: World) -> None:

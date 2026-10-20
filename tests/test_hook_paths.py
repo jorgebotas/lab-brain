@@ -35,6 +35,14 @@ def test_canonical_and_fold(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     assert fold("/x/Café") == fold("/x/CAFÉ") == "/x/café"
 
 
+def test_unknown_user_is_a_relative_name(tmp_path: Path) -> None:
+    """Ruling R15: an unknown `~user` is left as written, a relative name, as the shell does."""
+    base = canonical(tmp_path)
+    assert canonical("~nosuchuser5/x", base) == base / "~nosuchuser5" / "x"
+    assert canonical("~nosuchuser5", base) == base / "~nosuchuser5"
+    assert spellings("~nosuchuser5/x", base) == (base / "~nosuchuser5" / "x",)
+
+
 def test_containing_by_prefix(tmp_path: Path) -> None:
     data = tmp_path / "vault" / "data"
     data.mkdir(parents=True)

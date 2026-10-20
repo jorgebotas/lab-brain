@@ -1,11 +1,267 @@
-"""The data guard and guard self-protection for PreToolUse (Task 2 fills this in)."""
+"""The data guard and guard self-protection for PreToolUse (spec sections 4 and 5).
+
+`check_tool` decides, in this order: an unprotected scope allows everything; a broken vault
+config denies everything except a Read of that vault's own `.labbrain/` files; a session cwd
+inside a protected root denies everything; then each tool is judged by the paths it names.
+Every check over-approximates: a candidate the guard cannot judge with confidence denies.
+Messages never quote a candidate path, a file name or file contents.
+"""
 
 from __future__ import annotations
 
-from labbrain.hooks.payload import Denial, Payload
-from labbrain.hooks.scope import Scope
+import os
+import re
+from collections.abc import Iterable
+from fnmatch import fnmatchcase
+from pathlib import Path
+from typing import Any
+
+from labbrain.hooks import bash
+from labbrain.hooks.paths import ProtectedRoot, canonical, fold
+from labbrain.hooks.payload import Denial, Payload, data_denial
+from labbrain.hooks.scope import Scope, VaultInfo
+
+SKIP_TOOLS: frozenset[str] = frozenset(
+    {
+        "Agent",
+        "Task",
+        "TodoWrite",
+        "ToolSearch",
+        "Skill",
+        "AskUserQuestion",
+        "WebSearch",
+        "ExitPlanMode",
+        "EnterPlanMode",
+        "SendMessage",
+        "TaskStop",
+        "ScheduleWakeup",
+    }
+)
+FILE_TOOLS = frozenset({"Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "NotebookRead", "LS"})
+WRITE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
+PATH_KEYS = ("file_path", "notebook_path", "path")
+
+# A Glob component with any of these is a wildcard. `(` is added to the spec's `*?[{` so an
+# extglob such as `@(name)` is not taken as a literal directory name.
+GLOB_SPECIAL = frozenset("*?[{(")
+# Remaining Glob syntax that fnmatch does not model: treated as able to reach anything below.
+GLOB_UNMODELLED = ("**", "{", "(", "\\")
+
+MAX_DEPTH = 20  # containers nested deeper than this in tool_input are not walked: deny
+MAX_STRINGS = 2000  # more strings than this in tool_input: deny
+MAX_STRING = 4096  # a path candidate is at most this long; the textual net sees it all
+
+# A tool name goes into the message: anything outside this set is replaced, length capped.
+_UNSAFE_NAME = re.compile(r"[^A-Za-z0-9_.:-]+")
+MAX_NAME = 128
+
+CWD_SUBJECT = "this session's working directory"
+BROKEN_CONFIG_MESSAGE = (
+    "lab-brain guard: this vault's .labbrain/config.yaml could not be loaded, so protected "
+    "data paths are unknown and every tool call is blocked. Ask the user to fix "
+    ".labbrain/config.yaml (labbrain lint shows the problem)."
+)
+GUARD_CONFIG_MESSAGE = (
+    "lab-brain guard: agents may not change lab-brain or Claude Code guard settings in a "
+    "protected vault. Ask the user to make this change."
+)
+
+
+class _Unsure(Exception):
+    """A candidate the guard cannot judge with confidence; the call is denied."""
 
 
 def check_tool(payload: Payload, scope: Scope) -> Denial | None:
-    """The denial for this tool call under the data guard, or None (stub: nothing found)."""
+    """The denial for this tool call under the data guard and self-protection, or None."""
+    if not scope.protected:
+        return None
+    if scope.broken and not _reads_broken_config(payload, scope.broken):
+        return Denial("config", BROKEN_CONFIG_MESSAGE)
+    name = _UNSAFE_NAME.sub("_", payload.tool_name)[:MAX_NAME] or "tool"
+    subject = f"this {name} call"
+    try:
+        return _check(payload, scope, subject)
+    except _Unsure:
+        roots = scope.targets.roots
+        # No known root means the scope is protected only by a broken vault.
+        return data_denial(roots[0], subject) if roots else Denial("config", BROKEN_CONFIG_MESSAGE)
+
+
+def _reads_broken_config(payload: Payload, broken: Iterable[VaultInfo]) -> bool:
+    """Whether this is a Read of a file inside a broken vault's own `.labbrain/`.
+
+    The directory is not resolved: when `.labbrain` is itself a link, no resolved path lies
+    below it, so nothing is allowed.
+    """
+    value = payload.tool_input.get("file_path")
+    if payload.tool_name != "Read" or not isinstance(value, str):
+        return False
+    try:
+        path = canonical(value, payload.cwd)
+    except (ValueError, RuntimeError, OSError):
+        return False
+    return any(v.root / ".labbrain" in path.parents for v in broken)
+
+
+def _canon(value: object, base: Path) -> Path:
+    """Canonical `value` joined to `base`; anything that cannot be canonicalised is unsure."""
+    if not isinstance(value, str):
+        raise _Unsure
+    try:
+        return canonical(value, base)
+    except (ValueError, RuntimeError, OSError):
+        raise _Unsure from None
+
+
+def _check(payload: Payload, scope: Scope, subject: str) -> Denial | None:
+    cwd = payload.cwd
+    root = scope.targets.containing(_canon(str(cwd), cwd))
+    if root is not None:
+        return data_denial(root, CWD_SUBJECT)
+    tool, args = payload.tool_name, payload.tool_input
+    if tool in FILE_TOOLS:
+        return _file_tool(tool, args, cwd, scope, subject)
+    if tool == "Grep":
+        return _grep(args, cwd, scope, subject)
+    if tool == "Glob":
+        return _glob(args, cwd, scope, subject)
+    if tool == "Bash":
+        command = args.get("command")
+        if not isinstance(command, str):
+            raise _Unsure
+        return bash.check_command(
+            command, payload.cwd, scope, env=scope.env, session_id=payload.session_id
+        )
+    if tool in SKIP_TOOLS:
+        return None
+    return _any_tool(args, cwd, scope, subject)
+
+
+def _file_tool(
+    tool: str, args: dict[str, Any], cwd: Path, scope: Scope, subject: str
+) -> Denial | None:
+    paths = [_canon(args[key], cwd) for key in PATH_KEYS if args.get(key) is not None]
+    for path in paths:
+        root = scope.targets.containing(path)
+        if root is not None:
+            return data_denial(root, subject)
+    if tool in WRITE_TOOLS and any(scope.targets.is_guard_file(p) for p in paths):
+        return Denial("guard-config", GUARD_CONFIG_MESSAGE)
+    return None
+
+
+def _start(args: dict[str, Any], cwd: Path) -> Path:
+    """The canonical directory a Grep or Glob call starts from (`path`, default cwd)."""
+    value = args.get("path")
+    return _canon(str(cwd) if value is None or value == "" else value, cwd)
+
+
+def _grep(args: dict[str, Any], cwd: Path, scope: Scope, subject: str) -> Denial | None:
+    start = _start(args, cwd)
+    root = scope.targets.containing(start)
+    below = scope.targets.under(start)  # treated as rg: a recursive search enters them
+    if root is not None or below:
+        return data_denial(root or below[0], subject)
+    glob = args.get("glob")
+    if glob is not None:
+        if not isinstance(glob, str):
+            raise _Unsure
+        root = _named(glob, _all_spellings(scope))
+        if root is not None:
+            return data_denial(root, subject)
+    return None
+
+
+def _glob(args: dict[str, Any], cwd: Path, scope: Scope, subject: str) -> Denial | None:
+    pattern = args.get("pattern")
+    if not isinstance(pattern, str):
+        raise _Unsure
+    if pattern.startswith("~"):  # taken as the home it names, as canonical() would
+        try:
+            pattern = str(Path(pattern).expanduser())
+        except RuntimeError:
+            raise _Unsure from None
+    parts = (_start(args, cwd) / pattern).parts
+    cut = next((i for i, part in enumerate(parts) if GLOB_SPECIAL & set(part)), len(parts))
+    prefix = _canon(str(Path(*parts[:cut])), cwd)
+    rest = parts[cut:]
+    if ".." in rest:  # a wildcard followed by `..` can climb anywhere
+        raise _Unsure
+    root = scope.targets.containing(prefix)
+    if root is not None:
+        return data_denial(root, subject)
+    for root in scope.targets.under(prefix):
+        if _may_reach(rest, prefix, root):
+            return data_denial(root, subject)
+    return None
+
+
+def _may_reach(rest: tuple[str, ...], prefix: Path, root: ProtectedRoot) -> bool:
+    """Whether the wildcard components `rest` below `prefix` could match inside `root`."""
+    text = "/".join(rest)
+    if any(token in text for token in GLOB_UNMODELLED):
+        return True
+    relative = fold(root.path)[len(fold(prefix).rstrip(os.sep)) :].strip(os.sep).split(os.sep)
+    if len(rest) < len(relative):
+        return False  # every match lies above the root
+    return all(fnmatchcase(name, fold(part)) for name, part in zip(relative, rest, strict=False))
+
+
+def _spellings(root: ProtectedRoot, scope: Scope) -> set[str]:
+    """The folded spellings of `root` the textual net looks for: configured, `~`-expanded
+    (with the hook's HOME, or the user database for `~user`) and canonical."""
+    configured = root.configured.strip()
+    found = {configured, str(root.path)}
+    if configured == "~" or configured.startswith("~/"):
+        home = scope.env.get("HOME")
+        if home:
+            found.add(home + configured[1:])
+    elif configured.startswith("~"):
+        found.add(os.path.expanduser(configured))  # `~user`: the user database, not HOME
+    return {fold(s.rstrip(os.sep) or s) for s in found if s}
+
+
+Spellings = list[tuple[ProtectedRoot, set[str]]]
+
+
+def _all_spellings(scope: Scope) -> Spellings:
+    return [(root, _spellings(root, scope)) for root in scope.targets.roots]
+
+
+def _named(text: str, spellings: Spellings) -> ProtectedRoot | None:
+    """The root one of whose spellings occurs in `text`, compared folded."""
+    key = fold(text)
+    for root, names in spellings:
+        if any(name in key for name in names):
+            return root
+    return None
+
+
+def _strings(tool_input: dict[str, Any]) -> list[str]:
+    """Every string in `tool_input`, keys included; past the caps the call is unsure."""
+    found: list[str] = []
+    stack: list[tuple[Any, int]] = [(tool_input, 0)]
+    while stack:
+        value, depth = stack.pop()
+        if isinstance(value, str):
+            found.append(value)
+            if len(found) > MAX_STRINGS:
+                raise _Unsure
+        elif isinstance(value, dict | list):
+            if depth > MAX_DEPTH:
+                raise _Unsure
+            items = [x for kv in value.items() for x in kv] if isinstance(value, dict) else value
+            stack.extend((item, depth + 1) for item in items)
+    return found
+
+
+def _any_tool(args: dict[str, Any], cwd: Path, scope: Scope, subject: str) -> Denial | None:
+    """Every string is a path candidate and is searched for a root's spelling."""
+    spellings = _all_spellings(scope)
+    for text in _strings(args):
+        root = _named(text, spellings)
+        if root is None:
+            root = scope.targets.containing(_canon(text[:MAX_STRING], cwd))
+        if root is not None:
+            return data_denial(root, subject)
     return None

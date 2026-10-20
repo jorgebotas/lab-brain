@@ -457,6 +457,31 @@ def cmd_exp_record(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_hook(args: argparse.Namespace) -> int:
+    """Run one Claude Code hook: payload on stdin, exit 0 or 2, reason on stderr."""
+    from labbrain.hooks.entry import run_hook
+    from labbrain.hooks.payload import MAX_STDIN
+
+    try:
+        data = sys.stdin.buffer.read(MAX_STDIN + 1)
+    except Exception:  # no usable stdin: run_hook treats empty input as a failure
+        data = b""
+    code, out, err = run_hook(args.event, data, os.environ)
+    try:
+        if out:
+            sys.stdout.write(out)
+        sys.stdout.flush()
+    except (OSError, ValueError):
+        _detach_stdout()
+    if err:
+        try:
+            sys.stderr.write(err + "\n")
+            sys.stderr.flush()
+        except (OSError, ValueError):
+            pass
+    return code
+
+
 # --- parser -----------------------------------------------------------------------
 
 
@@ -618,11 +643,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--at", default=None, help="ISO datetime to use instead of now")
     p.add_argument("--finish", default=None, help="then run `finish` with this log text")
     p.set_defaults(func=cmd_exp_record)
+
+    p = add("hook", "run a Claude Code hook (payload JSON on stdin)")
+    p.add_argument("event", choices=("pre-tool-use", "post-tool-use", "session-start"))
+    p.set_defaults(func=cmd_hook)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.func is cmd_hook:
+        # Hooks run on every tool call: no vault import here (pydantic), and cmd_hook keeps
+        # the hook exit contract (0 or 2, fixed messages) itself.
+        return cmd_hook(args)
     from labbrain.errors import EngineError
     from labbrain.vault import ConfigError, VaultNotFound
 

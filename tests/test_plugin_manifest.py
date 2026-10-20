@@ -133,3 +133,43 @@ def test_skill_command_flags_exist_in_the_cli(name: str) -> None:
 def test_brain_core_is_short() -> None:
     lines = (REPO / "skills" / "brain-core" / "SKILL.md").read_text(encoding="utf-8").splitlines()
     assert len(lines) <= 80
+
+
+def test_hooks_json() -> None:
+    from labbrain.hooks.entry import EVENTS
+
+    data = json.loads((REPO / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+    assert isinstance(data["description"], str) and data["description"].strip()
+    hooks = data["hooks"]
+    assert set(hooks) == {"PreToolUse", "PostToolUse", "SessionStart"}
+
+    def only(event: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        [entry] = hooks[event]
+        [hook] = entry["hooks"]
+        assert hook["type"] == "command"
+        return entry, hook
+
+    pre_entry, pre = only("PreToolUse")
+    assert pre_entry["matcher"] == "*"
+    assert pre["onFailure"] == "block" and pre["timeout"] == 120
+    assert pre["command"].endswith(" || exit 2")
+    post_entry, post = only("PostToolUse")
+    assert post_entry["matcher"] == "Write|Edit|MultiEdit|NotebookEdit"
+    assert post["command"].endswith(" || exit 2") and post["timeout"] == 120
+    start_entry, start = only("SessionStart")
+    assert "matcher" not in start_entry
+    assert "|| exit 2" not in start["command"] and start["timeout"] == 60
+
+    prefix = f"{ENGINE} hook "
+    named = []
+    for hook in (pre, post, start):
+        command = hook["command"]
+        assert command.startswith(prefix), command
+        event = command[len(prefix) :].removesuffix(" || exit 2")
+        assert event in EVENTS, command
+        named.append(event)
+    assert named == list(EVENTS)
+    assert "hook" in subparsers(build_parser())
+
+    project = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "hooks" in project["tool"]["hatch"]["build"]["targets"]["sdist"]["only-include"]

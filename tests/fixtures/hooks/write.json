@@ -1,0 +1,15 @@
+{
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "transcript_path": "/tmp/labbrain-fixture/transcript.jsonl",
+  "cwd": "{cwd}",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "prompt_id": "00000000-0000-4000-8000-000000000002",
+  "scratchpad_dir": "/tmp/labbrain-fixture/scratchpad",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "{path}",
+    "content": "{content}"
+  },
+  "tool_use_id": "toolu_fixture_0001"
+}

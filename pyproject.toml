@@ -31,6 +31,7 @@ only-include = [
     "docs",
     "scripts",
     "skills",
+    "hooks",
     ".claude-plugin",
     "README.md",
     "LICENSE",
@@ -64,6 +65,7 @@ include = [
     "*/labbrain/lint/*",
     "*/labbrain/trackers/*",
     "*/labbrain/experiments.py",
+    "*/labbrain/hooks/*",
 ]
 show_missing = true
 

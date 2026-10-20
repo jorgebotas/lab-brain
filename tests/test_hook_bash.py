@@ -122,6 +122,13 @@ CASES: list[tuple[str, str, str]] = [
     ("cat-flag-subst", "ls $(cat -n <<'EOF'\nsrc\nEOF\n)", "deny"),
     ("literal-subst-path", "cat $(echo ../mnt)/phi/rows.csv", "deny"),
     ("printf-format-subst", "cat ../mnt/$(printf %s%s p hi)/rows.csv", "deny"),
+    # ruling R19a: escapes and other conversions are not literal
+    ("printf-escape", "cat {tmp}/mnt/$(printf 'p\\x68i')/rows.csv", "deny"),
+    ("echo-e-escape", "cat {tmp}/mnt/$(echo -e 'p\\x68i')/rows.csv", "deny"),
+    ("echo-backslash", "cat {tmp}/mnt/$(echo 'p\\x68i')/rows.csv", "deny"),
+    ("printf-conversion", "cat {tmp}/mnt/$(printf %c phi)/rows.csv", "deny"),
+    ("echo-n-literal", "ls $(echo -n src)", "allow"),
+    ("printf-s-literal", "ls $(printf '%s' src)", "allow"),
     ("colon-prefix", "cat file:../mnt/phi/rows.csv", "deny"),
     ("bracket-prefix", "echo [../mnt/phi/rows.csv]", "deny"),
     ("link-dotdot", "cat data/../phi-sibling/rows.csv", "deny"),

@@ -307,6 +307,7 @@ _LOCAL_REF = re.compile(f"{_VAR}{_LOCAL}([0-9]+){_END}")
 _MARKER = re.compile(f"({_VAR}[A-Za-z0-9_{_LIT}]*{_END})")
 LITERAL_PROGRAMS: frozenset[str] = frozenset({"echo", "printf"})
 _PRINTF_CONVERSION = re.compile(r"%%|%[-+ #0-9.]*[a-zA-Z]")
+_ECHO_ESCAPES = re.compile(r"-[neE]*[eE][neE]*")  # echo flags that switch escapes on or off
 # Raw-text runs are split at these characters, never matched with a backtracking regex
 # (that is quadratic on long undelimited text); a run is a candidate when it holds / ~ or .
 _RAW_DELIMITERS = re.compile(r"[\s'\"`()<>;|&=,]+")
@@ -433,8 +434,14 @@ def _literal_output(inner: str) -> list[str] | None:
     if program in LITERAL_PROGRAMS and not scanned.literal:
         if any(_is_operator(a) or not _GLOB_CHARS.isdisjoint(a) for a in args):
             return None
+        if any("\\" in a for a in args):  # R19a: escapes (zsh's echo expands them too)
+            return None
         if program == "echo":
+            if any(_ECHO_ESCAPES.fullmatch(a) for a in args):
+                return None  # R19a: echo -e / -E
             return [" ".join(args)]
+        if args and any(c not in ("%s", "%%") for c in _PRINTF_CONVERSION.findall(args[0])):
+            return None  # R19a: only %s and %% are literal
         return list(dict.fromkeys([_printf(args), " ".join(args), "".join(args[1:])]))
     return None
 

@@ -312,22 +312,23 @@ _LIT_REF = re.compile(f"{_VAR}{_LIT}[0-9]+{_END}")
 # R19c(c): a command that could redefine `cat` (or what runs as it) gets no literals.
 _FUNCTION_DEF = re.compile(r"(?:^|[\s;&|(){}])function\s+\S|[^\s;&|(){}<>]\s*\(\s*\)")
 LITERAL_SPOILERS: tuple[str, ...] = ("alias", "unalias", "shopt", "enable", "hash")
-# R19d: literals need a command with no assignment (NAME=, NAME+=, NAME[x]=, NAME:=, and
+# R19d(a): literals need a command with no assignment: NAME=, NAME+=, NAME[x]=, NAME:=, and
 # arithmetic's `NAME = 3` or `NAME <<= 3`, at a word's start or after punctuation, in each
-# lexed word and in the marked text), none of these program words (after wrappers; all but
-# `.` also as any other word), and no carriage return. Comparisons count too.
+# lexed word and in the marked text. Comparisons count too. R19d(c): and no carriage return.
 _ANY_ASSIGN = re.compile(r"(?:^|[^\w./-])[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\s*[-+*/%&|^:<>]*=")
-LITERAL_PROGRAM_WORDS: frozenset[str] = frozenset(
-    {"set", "unset", "trap", "export", "declare", "typeset", "local", "readonly", "builtin"}
-    | {"command", "eval", "source", ".", "alias", "unalias", "shopt", "enable", "hash"}
-    | {"autoload", "functions", "emulate", "setopt", "unsetopt", "zmodload", "exec", "cd"}
-    | {"pushd", "popd"}
-    # beyond R19d's list: builtins that assign a named variable without `=`
-    | {"read", "mapfile", "readarray", "getopts", "let", "vared", "zparseopts", "sysread"}
-    | {"zformat", "strftime", "zstyle", "zregexparse"}
+# R19e: and every program word, bar the literal form's own `cat`, is `git` or `gh` running
+# one of these built-in subcommands (an alias or a git-x / gh extension could be anything),
+# with no git option that changes configuration or where git finds its programs.
+LITERAL_GIT_SUBCOMMANDS: frozenset[str] = frozenset(
+    {"add", "commit", "tag", "notes", "merge", "stash", "status", "diff", "log", "show"}
+    | {"push", "pull", "fetch", "checkout", "switch", "branch", "restore", "reset", "rm"}
+    | {"mv"}
 )
-# Builtins that assign a variable through an option: printf -v, print -v (zsh), wait -p.
-LITERAL_SETTER_FLAGS: Mapping[str, str] = {"printf": "v", "print": "v", "wait": "p"}
+LITERAL_GH_SUBCOMMANDS: frozenset[str] = frozenset(
+    {"pr", "issue", "release", "label", "gist", "repo", "run", "workflow", "api", "status"}
+    | {"search", "browse"}
+)
+LITERAL_GIT_UNSAFE: tuple[str, ...] = ("-c", "--config-env", "--exec-path")
 # Raw-text runs are split at these characters, never matched with a backtracking regex
 # (that is quadratic on long undelimited text); a run is a candidate when it holds / ~ or .
 _RAW_DELIMITERS = re.compile(r"[\s'\"`()<>;|&=,]+")
@@ -359,6 +360,7 @@ class _Scanned:
     ok: bool  # quotes, substitutions and braces all closed
     end: int  # index just past the scanned region (at the closer, for a substitution)
     literals: list[list[str]] = field(default_factory=list)  # R19 outputs, by index
+    literal_nested: set[int] = field(default_factory=set)  # nested[k] is a literal's `cat`
 
 
 def _skip_quoted(text: str, i: int) -> int:
@@ -432,6 +434,7 @@ def _substitution(inner: str, out: list[str], scanned: _Scanned, whole: bool) ->
         out.append(WILD)
     else:
         out.append(f"{_VAR}{_LOCAL}{len(scanned.literals)}{_END}")
+        scanned.literal_nested.add(len(scanned.nested) - 1)
         scanned.literals.append(literal)
 
 
@@ -889,6 +892,7 @@ class _Check:
         self.literals: list[list[str]] = []  # R19 substitution outputs, by global index
         self.literals_off = False  # R19c(c): every literal reads as WILD
         self.marked_texts: list[str] = []  # each level's marked text (no heredoc bodies)
+        self.literal_forms: set[int] = set()  # simples that are a literal's own `cat` (R19e)
         self.folded = fold(command)
         root = scope.env.get(ENV_PLUGIN_ROOT)
         self.plugin_root = canonical(root, self.home) if root else None
@@ -904,7 +908,7 @@ class _Check:
         except (KeyError, OSError):
             return WILD
 
-    def parse(self, text: str, depth: int = 0) -> None:
+    def parse(self, text: str, depth: int = 0, literal_form: bool = False) -> None:
         if depth > MAX_DEPTH:
             raise _Unconfident
         scanned = _scan(text)
@@ -925,13 +929,15 @@ class _Check:
         nested = list(scanned.nested)
         for words in _simple_commands(tokens):
             simple = self._simple(words, bindings)
+            if literal_form:
+                self.literal_forms.add(len(self.simples))
             self.simples.append(simple)
             self._bind(words, simple, bindings)
             nested.extend(self._nested_texts(simple))
         for body in (scanned.marked, *scanned.literal):
             self.raw.append((body, bindings))
-        for inner in nested:
-            self.parse(inner, depth + 1)
+        for k, inner in enumerate(nested):
+            self.parse(inner, depth + 1, k in scanned.literal_nested)
 
     def _simple(self, words: list[str], bindings: dict[str, list[str]]) -> _Simple:
         words = list(words)
@@ -1468,12 +1474,16 @@ class _Check:
 
     def _literals_unsafe(self) -> bool:
         """R19c(c): could this command redefine `cat`, or is it dynamic already?
-        R19d: or does it assign, change the shell's state, or hold a carriage return?"""
+        R19d/R19e: or does it assign, hold a carriage return, or run anything but git/gh?"""
         if self.unconfident or self.dangerous or "\r" in self.command:
             return True
         if any(_ANY_ASSIGN.search(text) for text in self.marked_texts):
             return True
-        if any(self._changes_shell(simple) for simple in self.simples):
+        if any(
+            not self._git_or_gh(simple)
+            for k, simple in enumerate(self.simples)
+            if k not in self.literal_forms
+        ):
             return True
         text = "\n".join(fold(t) for t in self.marked_texts)
         if _FUNCTION_DEF.search(text):
@@ -1488,25 +1498,34 @@ class _Check:
         )
 
     @staticmethod
-    def _changes_shell(simple: _Simple) -> bool:
-        """R19d (a) and (b) for one simple command, on its marked words (no heredoc body)."""
-        words = simple.marked
-        if any(_ANY_ASSIGN.search(word) for word in words):
-            return True
-        if any(fold(word) in LITERAL_PROGRAM_WORDS - {"."} for word in words):
-            return True
-        views = [*simple.views, *_views(words)]
-        if any(view.name in LITERAL_PROGRAM_WORDS for view in views):
-            return True
-        for view in views:
-            flag = LITERAL_SETTER_FLAGS.get(view.name)
-            options = [w for w in words[view.pos + 1 :] if w.startswith("-") and w != "--"]
-            if flag and any(flag in option for option in options):
-                return True
-        return False
+    def _git_or_gh(simple: _Simple) -> bool:
+        """R19d(a) and R19e for one simple command, on its marked words (no heredoc body):
+        no assignment, and only `git` or `gh` running a built-in subcommand."""
+        if any(_ANY_ASSIGN.search(word) for word in simple.marked):
+            return False
+        for words in (simple.marked, simple.first):
+            for view in _views(words):
+                if view.name.startswith("git "):
+                    continue  # the subcommand view; checked with its `git` below
+                if view.name == "gh":
+                    sub = words[view.pos + 1] if view.pos + 1 < len(words) else ""
+                    if fold(sub) not in LITERAL_GH_SUBCOMMANDS:
+                        return False
+                elif view.name == "git":
+                    j = view.pos + 1
+                    while j < len(words) and words[j].startswith("-"):
+                        if words[j].startswith(LITERAL_GIT_UNSAFE):
+                            return False
+                        j += 2 if words[j] in GIT_VALUES else 1
+                    if j >= len(words) or fold(words[j]) not in LITERAL_GIT_SUBCOMMANDS:
+                        return False
+                else:
+                    return False
+        return True
 
     def _reparse_without_literals(self) -> None:
         self.simples, self.raw, self.literals, self.marked_texts = [], [], [], []
+        self.literal_forms = set()
         self.unconfident = self.dangerous = False
         self.literals_off = True
         self.parse(self.command)

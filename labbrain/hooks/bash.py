@@ -319,6 +319,10 @@ _REST = "\ue007"
 _SHORT_PARAMS = {**dict.fromkeys("?#$!-", _SHORT), "*": WILD, "@": _POSITIONAL}
 _SHORT_PARAMS.update(dict.fromkeys("0123456789", _POSITIONAL))
 _ZSH_LENGTH = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_?$*@#-")
+# R33b: zsh's unbraced flag forms, a run of = ~ ^ +, an optional #, then a name or special.
+_ZSH_FLAGGED = re.compile(r"[=~^+]+#?(?:[A-Za-z_][A-Za-z0-9_]*|[0-9?#$!@*-])")
+# R33c: the pieces a candidate is split into (`_PIECE_SPLIT`) and the text between them.
+_PIECE_TEXT = re.compile(r"[^=:,]+")
 _MARKS = re.compile("[\ue000-\ue007]")  # the pre-pass's own marks: never in a command
 # Ruling R19b: a whole-word `"$(cat <<'EOF' … EOF)"` stands for its literal heredoc body;
 # the pre-pass marks it _VAR _LOCAL k _END, which _Check.parse renumbers _VAR _LIT k _END.
@@ -513,6 +517,10 @@ def _expansion(
         body = text[i + 2 : j]
         out.append(WILD if "\\" in body else "'" + body + "'")
         return min(j + 1, n), j < n
+    match = _ZSH_FLAGGED.match(text, i + 1)
+    if match:  # R33b: zsh's `$=X`, `$~X`, `$^X`, `$+X` (`$=#X`): the value is not known
+        out.append(WILD)
+        return match.end(), True
     match = _NAME.match(text, i + 1)
     if match:
         out.append(_VAR + match.group() + _END)
@@ -630,8 +638,12 @@ def _scan(text: str, i: int = 0, closer: str | None = None) -> _Scanned:
                 d = text[i]
                 if d == '"':
                     break
-                if d == "\\":
-                    out.append(text[i : i + 2])
+                if d == "\\":  # R33a: POSIX drops the backslash only before $ ` " \ newline
+                    escaped = text[i + 1 : i + 2]
+                    if escaped in ("$", "`"):
+                        out.append(escaped)  # a literal now, an expansion in an `sh -c` body
+                    elif escaped != "\n":
+                        out.append(text[i : i + 2])  # shlex itself unescapes \" and \\
                     i += 2
                 elif d == "`" or (d == "$" and text[i + 1 : i + 2] != '"'):
                     i, closed = _expansion(text, i, out, scanned, at_word_start and i == opened)
@@ -1666,7 +1678,8 @@ def _params(word: str) -> str:
 
     From zsh's length form (`$#hi`), the rest of the word is WILD. A word made only of
     `$? $# $$ $! $-` names no path: each is `_`. Joined to anything else, each is `*`
-    (R32): rule 5 judges it like any glob, and since it can hold no `/` or `..` it does not
+    (R32), unless it is alone in a piece split at `=`, `:` or `,` (R33c: `rc=$?`). As `*`,
+    rule 5 judges it like any glob, and since it can hold no `/` or `..` it does not
     deny as a leading WILD would. A positional parameter alone (`$1`, `"$@"`) holds one
     word of the command, a candidate in its own right: `_`. Joined to anything, another
     parameter included (`$1$2`), it is WILD."""
@@ -1674,9 +1687,14 @@ def _params(word: str) -> str:
         word = word[: word.index(_REST)] + WILD
     if word == _POSITIONAL or (word and not word.strip(_SHORT)):
         return "_" * len(word)
-    if _SHORT in word:
-        word = word.replace(_SHORT, "*")
+    if _SHORT in word:  # R33c: a piece (split at = : ,) made only of them is lone too
+        word = _PIECE_TEXT.sub(_short_piece, word)
     return word.replace(_POSITIONAL, WILD) if _POSITIONAL in word else word
+
+
+def _short_piece(match: re.Match[str]) -> str:
+    piece = match.group()
+    return "_" * len(piece) if not piece.strip(_SHORT) else piece.replace(_SHORT, "*")
 
 
 def _delimited(word: str, text: str, *, loose: bool = False) -> bool:

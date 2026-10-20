@@ -372,10 +372,33 @@ CASES: list[tuple[str, str, str]] = [
     ("r29-export-one", "set -- hi; export X=$1; cat ../mnt/p$X/rows.csv", "deny"),
     ("r29-program-var", "set -- claude; X=$1; $X -p hi", "deny"),
     ("r29-echo-rc", "python train.py; rc=$?; echo $rc", "allow"),
-    # R32, an accepted false positive: the piece after `=` is the glob `*`, which matches
-    # the repo's `data` link into R (from a cwd without such a link it is allowed)
-    ("fp-echo-rc-labelled-link", 'python train.py; rc=$?; echo "rc=$rc"', "deny"),
     ("r29-for-at-echo", 'set -- a b; for f in "$@"; do echo "$f"; done', "allow"),
+    # --- ruling R33(a): inside double quotes, \$ and \` lose the backslash (POSIX), so an
+    # `sh -c` or `eval` body expands them
+    ("r33-dq-esc-var", 'sh -c "X=hi; cat ../mnt/p\\$X/rows.csv"', "deny"),
+    ("r33-dq-esc-eval", 'eval "X=hi; cat ../mnt/p\\$X/rows.csv"', "deny"),
+    ("r33-dq-esc-one", 'sh -c "cat ../mnt/p\\$1/rows.csv" _ hi', "deny"),
+    ("r33-dq-esc-at", 'sh -c "cat ../mnt/\\$@/rows.csv" _ phi', "deny"),
+    ("r33-dq-esc-home", 'sh -c "cat \\$HOME/phi/rows.csv"', "deny"),
+    ("r33-dq-esc-bash", 'bash -c "d=../mnt/phi; cat \\$d/rows.csv"', "deny"),
+    ("r33-dq-esc-backtick", 'sh -c "cat \\`echo ../mnt/phi\\`/rows.csv"', "deny"),
+    ("r33-dq-esc-text", 'echo "costs \\$5 and \\"quoted\\" \\\\ ok"', "allow"),
+    # --- ruling R33(b): zsh's flag forms `$=X`, `$~X`, `$^X`, `$+X` are WILD
+    ("r33-zsh-eq", "X=hi; cat ../mnt/p$=X/rows.csv", "deny"),
+    ("r33-zsh-tilde", "X=hi; cat ../mnt/p$~X/rows.csv", "deny"),
+    ("r33-zsh-caret", "X=hi; cat ../mnt/p$^X/rows.csv", "deny"),
+    ("r33-zsh-eq-home", "cat ../mnt/p$=HOME/rows.csv", "deny"),
+    ("r33-zsh-plus", "cat ../mnt/p$+PATH/rows.csv", "deny"),
+    ("r33-zsh-tilde-whole", "X=../mnt/phi; cat $~X/rows.csv", "deny"),
+    ("r33-zsh-caret-whole", "X=../mnt/phi; ls $^X", "deny"),
+    # --- ruling R33(c): a piece (split at = : ,) made only of special parameters is lone
+    ("r33-echo-rc-eq", 'python train.py; echo "rc=$?"', "allow"),
+    ("r33-echo-rc-colon", 'python train.py; echo "status:$?"', "allow"),
+    ("r33-echo-flags", 'echo "flags=$-"', "allow"),
+    ("r33-echo-rc-labelled", 'python train.py; rc=$?; echo "rc=$rc"', "allow"),
+    ("r33-echo-args", 'echo "args: $#" "exit code $?"', "allow"),
+    ("r33-test-rc", "python train.py; [ $? -ne 0 ] && echo fail", "allow"),
+    ("r33-log-pid", "python train.py > log_$$.txt 2> /tmp/train.$$.log; exit $?", "allow"),
     ("r27b-exit-status", 'python train.py; echo "exit: $?"; rc=$?; echo $rc $$', "allow"),
     ("r27b-arg-alone", "sh -c 'echo \"$1\"' _ hello", "allow"),
     ("r27b-args-alone", "sh -c 'ls \"$@\"' _ src docs", "allow"),
@@ -442,6 +465,22 @@ DIGIT_ROOT_CASES: list[tuple[str, str, str]] = [
     ("r32-braced-status", "f() {{ return -1; }}; f; ls ../mnt/run${{?}}", "deny"),
     ("r32-exit-status", 'f() {{ return -1; }}; f; echo "exit: $?"; rc=$?; echo $rc', "allow"),
     ("r29-bg-pid-empty", "ls ../mnt/run$!1", "deny"),  # `$!` is empty without a job
+    ("r33-dq-esc-len", 'zsh -c "hi=x; cat ../mnt/run\\$#hi/rows.csv"', "deny"),
+    ("r33-dq-esc-len-bash", 'bash -c "hi=x; cat ../mnt/run\\$#hi/rows.csv"', "deny"),
+    ("r33-dq-esc-status", 'zsh -c "false; cat ../mnt/run\\$?/rows.csv"', "deny"),
+    ("r33-dq-esc-neg", 'zsh -c "f() {{ return -1; }}; f; cat ../mnt/run\\$?/rows.csv"', "deny"),
+    ("r33-dq-esc-var-1", 'sh -c "X=1; cat ../mnt/run\\$X/rows.csv"', "deny"),
+    ("r33-dq-esc-one-1", 'sh -c "cat ../mnt/run\\$1/rows.csv" _ 1', "deny"),
+    ("r33-dq-esc-count", 'sh -c "cat ../mnt/run\\$#/rows.csv" _ a', "deny"),
+    ("r33-dq-esc-pid", 'sh -c "n=\\$\\$; ls ../mnt/run\\$n"', "deny"),
+    ("r33-dq-esc-len-bound", 'zsh -c "hi=x; n=\\$#hi; ls ../mnt/run\\$n"', "deny"),
+    ("r33-dq-esc-braced-len", 'zsh -c "hi=x; ls ../mnt/run\\${{#hi}}"', "deny"),
+    ("r33-eval-dq-len", 'hi=x; eval "cat ../mnt/run\\$#hi/rows.csv"', "deny"),
+    ("r33-zsh-plus-run", "cat ../mnt/run$+PATH/rows.csv", "deny"),
+    ("r33-zsh-tilde-bound", "hi=1; n=$~hi; ls ../mnt/run$n", "deny"),
+    ("r33-zsh-eq-len", "hi=x; ls ../mnt/run$=#hi", "deny"),
+    ("r33-joined-status", "ls ../mnt/run$?", "deny"),  # joined forms stay `*`
+    ("r33-echo-rc-eq", 'python train.py; echo "rc=$?" "status:$?" "flags=$-"', "allow"),
     ("special-params", "echo $? $#", "allow"),
     ("r29-echo-rc", "python train.py; rc=$?; echo $rc", "allow"),
     ("r29-exit-status", 'python train.py; echo "exit: $?"; rc=$?; echo $rc $$', "allow"),
@@ -642,7 +681,7 @@ def test_r27_rows_from_a_clean_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     w.cwd.mkdir()
     assert w.scope().protected
     for case_id, command, expected in CASES:
-        if case_id.startswith(("r27", "r29")):
+        if case_id.startswith(("r27", "r29", "r33")):
             assert _decision(w.check(command)) == expected, (case_id, w.render(command))
 
 

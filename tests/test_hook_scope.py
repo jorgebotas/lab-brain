@@ -2,25 +2,17 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
-from helpers import MIN_CONFIG, hook_payload, make_vault, write
+from helpers import MIN_CONFIG, clean_env, hook_payload, make_vault, write
 
 from labbrain.hooks.paths import GuardFile, canonical
 from labbrain.hooks.scope import find_vault_roots, load_scope, vault_of
 
 PROTECTED = MIN_CONFIG + "data_paths: ['~/phi', data]\n"
-HOOK_ENV_KEYS = ("CLAUDE_PROJECT_DIR", "LABBRAIN_VAULT", "CLAUDE_PLUGIN_ROOT", "UV_CACHE_DIR")
-
-
-def clean_env(**extra: str) -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if k not in HOOK_ENV_KEYS}
-    env.update(extra)
-    return env
 
 
 def test_no_vault_does_not_import_pydantic(tmp_path: Path) -> None:

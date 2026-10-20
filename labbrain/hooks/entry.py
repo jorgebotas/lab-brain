@@ -5,6 +5,8 @@ sanitized reason on stderr), never any other code. Nothing ever prints an allow 
 Any failure exits 2 with a fixed message; the exception itself is never shown, because its
 text can quote a command, a path or file contents. Output written to sys.stdout or
 sys.stderr by the checks themselves is discarded: only the returned strings reach Claude.
+That capture is Python-level only (the `sys` streams are swapped); a child process inherits
+the real file descriptors, so a check that runs one must capture its output itself.
 """
 
 from __future__ import annotations

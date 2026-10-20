@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from datetime import date
@@ -116,3 +117,14 @@ def hook_payload(name: str, **subs: Any) -> bytes:
     data = _substitute(data, {key: str(value) for key, value in subs.items()})
     data.update(overrides)
     return json.dumps(data, ensure_ascii=False).encode("utf-8")
+
+
+# The environment variables that select a vault or a guard tree for a hook call.
+HOOK_ENV_KEYS = ("CLAUDE_PROJECT_DIR", "LABBRAIN_VAULT", "CLAUDE_PLUGIN_ROOT", "UV_CACHE_DIR")
+
+
+def clean_env(**extra: str) -> dict[str, str]:
+    """This process's environment without HOOK_ENV_KEYS, plus `extra`."""
+    env = {k: v for k, v in os.environ.items() if k not in HOOK_ENV_KEYS}
+    env.update(extra)
+    return env

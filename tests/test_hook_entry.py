@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from helpers import hook_payload
+from helpers import clean_env, hook_payload
 
 from labbrain.hooks import entry, guard, post, session, writes
 from labbrain.hooks.entry import EVENTS, run_hook
@@ -20,11 +20,6 @@ from labbrain.hooks.payload import MAX_STDIN, Denial, PayloadError, data_denial,
 PRE_FAILED = "lab-brain guard failed; blocked to be safe"
 POST_FAILED = "lab-brain validator failed"
 SESSION_FAILED = "lab-brain session brief failed"
-HOOK_ENV_KEYS = ("CLAUDE_PROJECT_DIR", "LABBRAIN_VAULT", "CLAUDE_PLUGIN_ROOT", "UV_CACHE_DIR")
-
-
-def clean_env() -> dict[str, str]:
-    return {k: v for k, v in os.environ.items() if k not in HOOK_ENV_KEYS}
 
 
 def raise_secret(*_: Any) -> Any:
@@ -290,3 +285,22 @@ def test_data_denial_keeps_one_paragraph(tmp_path: Path) -> None:
     message = data_denial(root, "this Bash command").message
     assert "\n" not in message and "\x1b" not in message and "‮" not in message
     assert "protected data path #3 ('/mnt/a b [2J c')" in message
+
+
+def test_cli_hook_closed_stderr_still_exits_2(tmp_path: Path) -> None:
+    """A deny whose reason cannot be written still exits 2, never 120: stderr is detached
+    after a failed write, so the interpreter's final flush cannot fail again."""
+    read_end, write_end = os.pipe()
+    os.close(read_end)  # no reader: every write to the pipe fails with EPIPE
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "labbrain", "hook", "pre-tool-use"],
+            input=b"{}",
+            cwd=tmp_path,
+            env=clean_env(),
+            stdout=subprocess.PIPE,
+            stderr=write_end,
+        )
+    finally:
+        os.close(write_end)
+    assert (proc.returncode, proc.stdout) == (2, b"")

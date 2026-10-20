@@ -13,7 +13,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from labbrain import __version__
 from labbrain.layout import NOTE_TYPES
@@ -478,7 +478,7 @@ def cmd_hook(args: argparse.Namespace) -> int:
             sys.stderr.write(err + "\n")
             sys.stderr.flush()
         except (OSError, ValueError):
-            pass
+            _detach(sys.stderr)  # else the final flush fails again and the exit is 120
     return code
 
 
@@ -684,13 +684,18 @@ def main(argv: list[str] | None = None) -> int:
 
 def _detach_stdout() -> None:
     """Point stdout at /dev/null so the interpreter's final flush cannot fail again."""
+    _detach(sys.stdout)
+
+
+def _detach(stream: TextIO) -> None:
+    """Point `stream`'s file descriptor at /dev/null: its final flush cannot fail again."""
     try:
         devnull = os.open(os.devnull, os.O_WRONLY)
         try:
-            os.dup2(devnull, sys.stdout.fileno())
+            os.dup2(devnull, stream.fileno())
         finally:
             os.close(devnull)
-    except (OSError, ValueError):  # stdout is not a real file (e.g. captured)
+    except (OSError, ValueError, AttributeError):  # not a real file (e.g. captured)
         pass
 
 

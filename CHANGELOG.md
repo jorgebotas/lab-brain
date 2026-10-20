@@ -8,9 +8,11 @@ All notable changes to this project are documented here. Versions follow semanti
 
 - Claude Code hooks, shipped in the plugin (`hooks/hooks.json`) and run through
   `labbrain hook pre-tool-use | post-tool-use | session-start`:
-  - a data guard that blocks any tool call reading a protected data path, through Read,
-    Write, Edit, Glob, Grep, MCP tools and Bash (direct paths, `~`, `$HOME`, variables,
-    `..`, symlinks, case, globs, `cd`, recursive searches, inline code);
+  - a data guard that blocks any tool call that names a protected data path, or searches
+    into one, through Read, Write, Edit, Glob, Grep, MCP tools and Bash (direct paths, `~`,
+    `$HOME`, variables, `..`, symlinks, case, globs, `cd`, recursive searches, literal paths
+    inside inline code). It judges what the call names, not what a program opens: see the
+    README's known gaps;
   - guard self-protection: in a protected vault the agent may not change `.labbrain/`,
     `.copier-answers.yml`, `.claude/settings*.json`, the plugin or its caches, run
     `copier`, or start a nested agent CLI;

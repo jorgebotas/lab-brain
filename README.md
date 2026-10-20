@@ -30,8 +30,8 @@ The plugin also installs four Claude Code hooks. They run the same engine throug
 `uv` must be on `PATH`.
 
 - **Data guard** (before every tool call): in a vault with `protected_data: true`, blocks any
-  call that would read a `data_paths` entry, whether through Read, Glob, Grep, an MCP tool or
-  a Bash command.
+  tool call that names a `data_paths` entry, or searches into one, whether through Read, Glob,
+  Grep, an MCP tool or a Bash command.
 - **Frozen-file guard** (before writes): blocks rewrites of frozen notes, existing `raw/`
   files and manuscripts outside `manuscripts/_proposals/`. Notes not yet committed stay
   editable.
@@ -57,14 +57,22 @@ What this means in practice:
   `python train.py /data/rows.csv`.
 - **Search a narrower folder.** A recursive search (`grep -r`, `find`, Glob, Grep) from a
   folder that contains a data path is refused. `rg` from a code repo whose data folder is
-  gitignored is allowed.
+  gitignored is allowed. In a protected vault, a Glob or Grep from a folder with more than
+  20,000 entries, or from `/` or `~`, is refused too.
 - **Commit messages** go through `git commit -m "$(cat <<'EOF' … EOF)"` or `git commit -F`;
   other command substitutions can stand for any path, so they may be blocked.
 
 Known gaps: the guard reads command text, so it cannot see what a program opens or prints
 (by design: training runs read data), nor obfuscated or encoded paths, paths built inside
-inline code, or hard links. Frozen notes edited through Bash or written by an MCP tool are
-caught by lint and pre-commit, not by the hooks. For a stronger boundary, Claude Code's
+inline code, or hard links. Also not caught:
+
+- MCP tools that write vault files bypass the frozen-file guard, the PHI pre-scan and the
+  post-write validator; lint and pre-commit catch them at commit.
+- `git -C` or `--git-dir` with a pre-written repository config can run code.
+- `RIPGREP_CONFIG_PATH` could add `--follow` to `rg` (mitigated by the link walk).
+
+Frozen notes edited through Bash are caught by lint and pre-commit, not by the hooks. For a
+stronger boundary, Claude Code's
 OS-level Bash sandbox can deny reads of the data paths, at the cost of blocking training runs
 in the session.
 

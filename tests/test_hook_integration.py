@@ -24,7 +24,7 @@ import pytest
 from helpers import clean_env, hook_payload
 from test_hook_bash import CASES, GITIGNORED_CASES, BashWorld, make_bash_world
 
-from labbrain.hooks.entry import run_hook
+from labbrain.hooks.entry import PRE_FAILED, run_hook
 
 REPO = Path(__file__).resolve().parents[1]
 HOOKS_JSON = REPO / "hooks" / "hooks.json"
@@ -229,7 +229,8 @@ def corpus(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Corpus]:
 
 
 def test_corpus_through_entry(corpus: Corpus) -> None:
-    """Every deny row exits 2 with a reason; every allow row exits 0 silently."""
+    """Every deny row exits 2 with a real reason, never the fixed failure message (an engine
+    crash must not pass as a deny); every allow row exits 0 silently."""
     decided = [r for r in corpus.runs if r.expected]
     assert len(decided) >= len(CASES) + len(GITIGNORED_CASES) + len(FILE_CASES)
     wrong = [
@@ -237,6 +238,7 @@ def test_corpus_through_entry(corpus: Corpus) -> None:
         for r in decided
         if r.code != {"deny": 2, "allow": 0}[r.expected]
         or (r.expected == "deny" and not r.err.strip())
+        or (r.expected == "deny" and PRE_FAILED in r.err)  # a crash is not a deny
         or (r.expected == "allow" and (r.out or r.err))
     ]
     assert wrong == [], wrong

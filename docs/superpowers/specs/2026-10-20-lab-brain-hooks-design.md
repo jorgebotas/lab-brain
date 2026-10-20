@@ -162,13 +162,14 @@ For writes, the frozen-file guard and validator use the vault that contains the 
    - Lex the command with a shell-aware lexer. If lexing fails, fall back to splitting on whitespace and shell metacharacters.
    - Candidates are:
      - every word;
-     - every path-like substring of the raw command text (runs containing `/` or starting with `~` or `.`).
+     - every path-like substring of the raw command text (runs containing `/` or starting with `~` or `.`);
+     - the path-like pieces of each token split on `: [ ] { } @ ! $ % ^ * + ?` (ruling R17), so `file:../x` and `[../x]` count. The extra split applies only to text with no wildcard, so rules 2 and 5 still see the whole token. MCP strings get the same split.
    - Scanning the raw text also covers heredoc bodies and the code inside `python -c`, `node -e`, `duckdb -c` and similar.
 2. **Expansion.**
    - Expand `~`, `~user`, `$HOME`/`${HOME}`, and variables assigned earlier in the same command (`X=/p; cat $X/f`).
    - Expand other variables from the hook's environment.
    - A for-loop variable stands for the loop's words, which are candidates in their own right.
-   - Special and positional parameters (`$?`, `$#`, `$$`, `$!`, `$0`–`$9`, `$@`, `$*`) standing alone are not paths and are ignored. Next to path text (`p$1hi`, `../mnt/p$@hi`) they are wildcards (ruling R27).
+   - Special and positional parameters (`$?`, `$#`, `$$`, `$!`, `$0`–`$9`, `$@`, `$*`) standing alone are not paths and are ignored. Next to path text (`p$1hi`, `../mnt/p$@hi`) they are wildcards (ruling R27). Their marks survive binding into variables and loop lists and are resolved where the value is used (ruling R29).
    - **Wildcards.** A variable that cannot be bound to a value, a command substitution (`$(…)` or backticks), or a glob character makes that part of the candidate a wildcard.
    - **Literal substitutions** (rulings R19b–R19e). The one substitution read as literal text is a whole word `"$(cat <<'EOF' … EOF)"` with a quoted delimiter, which is how commit messages and PR bodies are passed. It is literal only when:
      - every program word in the command is exactly `git` or `gh`, running built-in subcommands: no `push`, `fetch` or `pull`, not `gh repo` or `gh gist`, and no `--` after `gh`;
@@ -222,8 +223,8 @@ For writes, the frozen-file guard and validator use the vault that contains the 
    - Unknown variables and command substitutions are handled by rule 2.
 9. **Lexing details.**
    - Redirection targets never name programs, scripts or `cd` targets (fix round 5).
-   - `<<<` is a herestring, not a heredoc.
-   - `$"…"` is a quoted string.
+   - `<<<` is a herestring, not a heredoc (ruling R24).
+   - `$"…"` is a quoted string (ruling R24).
 
 **Grep and Glob tools.**
 - Grep is treated as `rg` (rule 6a, without the ignore exception, since the tool's flags are not visible).
@@ -423,11 +424,15 @@ Controller rulings made during the build. The sections above have been updated t
 - **R11–R13.** Self-protection covers MCP tools; paths embedded in MCP strings are candidates; over-cap strings deny.
 - **R14, R16.** MCP writes to vault files and percent-encoded or `file://` spellings are residual risks (section 12).
 - **R15.** An unknown `~user` is a relative name, as the shell leaves it.
-- **R19a–R19e.** Substitutions are wildcards, except the whole-word quoted `cat` heredoc in pure `git`/`gh` commands (section 5, rule 2). Escapes and non-`%s` conversions are never literal.
+- **R17.** Candidate extraction also splits path-like tokens on `: [ ] { } @ ! $ % ^ * + ?` and adds the path-like pieces, for MCP strings and Bash (so `file:../x` and `[../x]` are caught). In Bash the extra split applies only to text with no wildcard, so the glob and variable rules still see the whole token.
+- **R18.** A Glob `[^…]` class is a negation, as in ripgrep, and is matched as `[!…]`, so `p[^x]i/*` cannot slip past a root `phi`.
+- **R19a–R19e.** Substitutions are wildcards, except the whole-word quoted `cat` heredoc in pure `git`/`gh` commands (section 5, rule 2). No `echo` or `printf` form is ever literal.
 - **R20, R21, R23.** Glob is a recursive construct with Claude Code's search bases; a pattern with more than 16 literal directories is unsure and denies.
 - **R22.** Every path is judged physically and textually.
 - **R26.** Rule 8's basename check also runs on quote- and backslash-stripped text.
+- **R24.** `<<<` is a herestring, not `<` plus a quoted heredoc (which hid a nested `$(claude)`), and `$"…"` is a quoted string.
 - **R27.** An assignment-only command with a redirection still binds (a); special and positional parameters next to path text are wildcards (b).
-- **Fix round 5.** Redirections never name programs; `<<<` is a herestring; `$"…"` is a quoted string.
+- **R29.** Special-parameter marks survive binding (for and select lists, assignments, `export`, `declare`, `local`, `readonly`) and are resolved where the value is used: next to path text they are wildcards, alone they are harmless, so `rc=$?; echo $rc` stays allowed.
+- **Fix round 5.** Redirections never name programs.
 - **Platform.** CLI 2.1.304 has a Glob tool (section 3).
 - **Frozen policy.** `POLICIES` lives in `labbrain/frozen.py`.

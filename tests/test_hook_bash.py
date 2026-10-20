@@ -101,9 +101,34 @@ CASES: list[tuple[str, str, str]] = [
     ("plugin-root-file", "uvx --from {plugin_root}/labbrain labbrain lint", "deny"),
     ("plugin-root-other-arg", 'uvx --from "{plugin_root}" labbrain lint {plugin_root}', "deny"),
     ("unclosed-quote-basename", "cat 'phi/rows.csv", "deny"),
+    # --- ruling R19: substitutions of literal text (cat <<heredoc, echo/printf literals)
+    (
+        "commit-heredoc",
+        "git commit -m \"$(cat <<'EOF'\nfix: tidy\n\nCo-Authored-By: X <x@y>\nEOF\n)\"",
+        "allow",
+    ),
+    (
+        "commit-heredoc-datapath",
+        "git commit -m \"$(cat <<'EOF'\nfix: tidy {R}/rows.csv\nEOF\n)\"",
+        "deny",
+    ),
+    ("echo-literal-subst", "ls $(echo src)", "allow"),
+    ("cat-file-subst", "wc -l $(cat {R}/list.txt)", "deny"),
+    ("printf-var-subst", 'cat $(printf %s "$X")/rows.csv', "deny"),
+    ("subst-leading-unknown", "cat $(pwd)/../mnt/phi/rows.csv", "deny"),
+    ("herestring-subst", "ls $(cat <<< src) `echo docs`", "allow"),
+    ("echo-glob-subst", "ls $(echo *)", "deny"),
+    ("echo-redirect-subst", "ls $(echo x > y)", "deny"),
+    ("cat-flag-subst", "ls $(cat -n <<'EOF'\nsrc\nEOF\n)", "deny"),
+    ("literal-subst-path", "cat $(echo ../mnt)/phi/rows.csv", "deny"),
+    ("printf-format-subst", "cat ../mnt/$(printf %s%s p hi)/rows.csv", "deny"),
     ("colon-prefix", "cat file:../mnt/phi/rows.csv", "deny"),
     ("bracket-prefix", "echo [../mnt/phi/rows.csv]", "deny"),
     ("link-dotdot", "cat data/../phi-sibling/rows.csv", "deny"),
+    # ruling R22: `..` read as text too (logical cd); only that reading reaches R here
+    ("textual-dotdot", "cat lnk/../mnt/phi/rows.csv", "deny"),
+    ("cd-logical", "cd lnk/.. && cat mnt/phi/rows.csv", "deny"),
+    ("cd-logical-deep", "cd brain/up/.. && cat ../../mnt/phi/rows.csv", "deny"),
     ("cd-home", "cd ~ && cat phi/rows.csv", "deny"),
     ("loop-two-values", "for d in x ../mnt; do cat $d/phi/rows.csv; done", "deny"),
     ("too-many-values", "; ".join(f"X=v{n}" for n in range(70)) + "; cat $X$X/f", "deny"),
@@ -196,7 +221,9 @@ def make_bash_world(
 
     The root R is `<tmp>/mnt/phi`, also reachable as `~/phi` (a link in `$HOME`). Unless
     `gitignored`, `repo/data` links to `R/sub`, so `data/..` resolves to R itself while
-    its lexical collapse would not. With `gitignored`, `repo/data` is instead a real data
+    its lexical collapse would not; and the other way round (ruling R22), `repo/lnk` and
+    `repo/brain/up` link deep into `<tmp>/other`, so `lnk/..` read as text is `repo` (where
+    `repo/mnt` links to `<tmp>/mnt`) while resolved it is not. With `gitignored`, `repo/data` is instead a real data
     folder, a root of its own, listed in `repo/.gitignore`. A second root `R data` has a
     space in its name.
     """
@@ -228,7 +255,13 @@ def make_bash_world(
         data_paths.append(str(repo / "data"))
     else:
         (repo / "data").symlink_to(root / "sub")
+        (tmp / "other" / "deep").mkdir(parents=True)
+        (tmp / "other" / "a" / "b" / "deep").mkdir(parents=True)
+        (repo / "lnk").symlink_to(tmp / "other" / "deep")
+        (repo / "mnt").symlink_to(tmp / "mnt")
     vault = make_vault(repo / "brain", MIN_CONFIG + f"data_paths: {json.dumps(data_paths)}\n")
+    if not gitignored:
+        (vault / "up").symlink_to(tmp / "other" / "a" / "b" / "deep")
     plugin_root = tmp / "plugin"
     (plugin_root / "labbrain" / "hooks").mkdir(parents=True)
     (plugin_root / "labbrain" / "hooks" / "guard.py").write_text("")
@@ -332,7 +365,7 @@ def test_rules_and_messages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
 
     for command in ("claude -p hi", "copier update", "cp x.py {plugin_root}", "rm -rf brain"):
         assert denial(command) == Denial("guard-config", GUARD_MESSAGE)
-    for command in ('cat "$DATA_DIR/rows.csv"', "cat $(echo {tmp})/mnt/phi/rows.csv"):
+    for command in ('cat "$DATA_DIR/rows.csv"', "cat $(pwd)/../mnt/phi/rows.csv"):
         assert denial(command) == Denial("data-guard", UNCONFIDENT_MESSAGE)
     found = denial("cat {R}/rows.csv")
     assert found.rule == "data-guard" and "#1" in found.message
@@ -434,6 +467,17 @@ def test_program_lists_in_one_place() -> None:
     assert {"grep", "rg", "find", "zip", "tar", "cp", "rsync"} <= set(FOLLOWING)
     assert {"python", "node", "perl", "ruby", "rscript", "duckdb", "sqlite3"} <= INTERPRETERS
     assert bash.RECURSIVE is RECURSIVE
+
+
+def test_readings_physical_and_textual(tmp_path: Path) -> None:
+    """Ruling R22: both readings of `..`; the physical one is never dropped."""
+    (tmp_path / "far" / "deep").mkdir(parents=True)
+    (tmp_path / "here").mkdir()
+    (tmp_path / "here" / "lnk").symlink_to(tmp_path / "far" / "deep")
+    base = tmp_path.resolve() / "here"
+    readings = bash._readings("lnk/../x", base)
+    assert readings == [tmp_path.resolve() / "far" / "x", base / "x"]
+    assert bash._readings("/plain/path", base) == [Path("/plain/path")]
 
 
 def test_tokenizer_matches_shlex(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

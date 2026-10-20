@@ -299,7 +299,14 @@ _SEPARATORS = set(";|()&\n")
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _ASSIGN = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)(\+?)=")
 _SPECIAL = set("?#$!@*-0123456789")
-_MARKER = re.compile(f"({_VAR}[A-Za-z0-9_]*{_END})")
+# Ruling R19: a substitution whose output is literal text (`cat <<EOF`, `echo word`) is
+# marked _VAR _LOCAL k _END by the pre-pass, renumbered _VAR _LIT k _END by _Check.parse.
+_LOCAL = "\ue004"
+_LIT = "\ue003"
+_LOCAL_REF = re.compile(f"{_VAR}{_LOCAL}([0-9]+){_END}")
+_MARKER = re.compile(f"({_VAR}[A-Za-z0-9_{_LIT}]*{_END})")
+LITERAL_PROGRAMS: frozenset[str] = frozenset({"echo", "printf"})
+_PRINTF_CONVERSION = re.compile(r"%%|%[-+ #0-9.]*[a-zA-Z]")
 # Raw-text runs are split at these characters, never matched with a backtracking regex
 # (that is quadratic on long undelimited text); a run is a candidate when it holds / ~ or .
 _RAW_DELIMITERS = re.compile(r"[\s'\"`()<>;|&=,]+")
@@ -330,6 +337,7 @@ class _Scanned:
     literal: list[str]  # heredoc bodies and comments: scanned for paths, not as commands
     ok: bool  # quotes, substitutions and braces all closed
     end: int  # index just past the scanned region (at the closer, for a substitution)
+    literals: list[list[str]] = field(default_factory=list)  # R19 outputs, by index
 
 
 def _skip_quoted(text: str, i: int) -> int:
@@ -368,21 +376,102 @@ def _matching_brace(text: str, i: int) -> int:
     return -1
 
 
-def _expansion(text: str, i: int, out: list[str], nested: list[str]) -> tuple[int, bool]:
+def _printf(args: Sequence[str]) -> str:
+    """What `printf FORMAT ARGS…` prints, closely enough: conversions take the arguments in
+    turn and the format repeats while arguments remain."""
+    if not args:
+        return ""
+    fmt, rest = args[0], list(args[1:])
+    out: list[str] = []
+    for _ in range(MAX_ALTERNATIVES):
+        used = 0
+        last = 0
+        for match in _PRINTF_CONVERSION.finditer(fmt):
+            out.append(fmt[last : match.start()])
+            last = match.end()
+            if match.group() == "%%":
+                out.append("%")
+                continue
+            out.append(rest[used] if used < len(rest) else "")
+            used += 1
+        out.append(fmt[last:])
+        rest = rest[used:]
+        if not rest or not used:
+            break
+    return "".join(out)
+
+
+def _literal_output(inner: str) -> list[str] | None:
+    """Ruling R19: the output of a substitution's command when it is literal text, else None.
+
+    Only `cat` fed by nothing but one heredoc or herestring, and `echo`/`printf` with
+    literal words (no variables, globs, substitutions or redirections), qualify.
+    """
+    if len(inner) > LEX_LIMIT:
+        return None
+    scanned = _scan(inner)
+    pieces = [scanned.marked, *scanned.literal]
+    if not scanned.ok or scanned.nested or any(_VAR in p or WILD in p for p in pieces):
+        return None
+    try:
+        tokens = _shlex(scanned.marked)
+    except ValueError:
+        return None
+    while tokens and set(tokens[0]) <= {"\n"}:
+        tokens.pop(0)
+    while tokens and set(tokens[-1]) <= {"\n"}:
+        tokens.pop()
+    if not tokens:
+        return None
+    program, args = tokens[0], tokens[1:]
+    if program == "cat":
+        if len(args) == 2 and args[0] == "<<" and len(scanned.literal) == 1:
+            return [scanned.literal[0]]  # a heredoc: its body (the delimiter is args[1])
+        if len(args) == 2 and args[0] == "<<<" and not scanned.literal:
+            return [args[1]]
+        return None
+    if program in LITERAL_PROGRAMS and not scanned.literal:
+        if any(_is_operator(a) or not _GLOB_CHARS.isdisjoint(a) for a in args):
+            return None
+        if program == "echo":
+            return [" ".join(args)]
+        return list(dict.fromkeys([_printf(args), " ".join(args), "".join(args[1:])]))
+    return None
+
+
+def _substitution(inner: str, out: list[str], scanned: _Scanned) -> None:
+    """Record a substitution: its command for analysis, and a marker for its output."""
+    scanned.nested.append(inner)
+    literal = _literal_output(inner)
+    if literal is None:
+        out.append(WILD)
+    else:
+        out.append(f"{_VAR}{_LOCAL}{len(scanned.literals)}{_END}")
+        scanned.literals.append(literal)
+
+
+def _expansion(text: str, i: int, out: list[str], scanned: _Scanned) -> tuple[int, bool]:
     """Mark the `$…` or backtick expansion at `text[i]`; (index after it, closed)."""
+    nested = scanned.nested
     n = len(text)
     if text[i] == "`":
         j = i + 1
         while j < n and text[j] != "`":
             j += 2 if text[j] == "\\" else 1
-        nested.append(text[i + 1 : j].replace("\\`", "`"))
-        out.append(WILD)
+        if j < n:
+            _substitution(text[i + 1 : j].replace("\\`", "`"), out, scanned)
+        else:
+            nested.append(text[i + 1 :])
+            out.append(WILD)
         return min(j + 1, n), j < n
     nxt = text[i + 1] if i + 1 < n else ""
     if nxt == "(":
         inner = _scan(text, i + 2, ")")
-        nested.append(text[i + 2 : inner.end])
-        out.append(WILD)
+        if inner.ok:
+            _substitution(text[i + 2 : inner.end], out, scanned)
+        else:
+            nested.append(text[i + 2 : inner.end])
+            out.append(WILD)
         return min(inner.end + 1, n), inner.ok
     if nxt == "{":
         j = _matching_brace(text, i + 1)
@@ -467,7 +556,7 @@ def _heredoc_bodies(
                     out.append(body[k : k + 2])
                     k += 2
                 else:
-                    k, closed = _expansion(body, k, out, scanned.nested)
+                    k, closed = _expansion(body, k, out, scanned)
                     scanned.ok = scanned.ok and closed
             scanned.literal.append("".join(out))
     pending.clear()
@@ -522,7 +611,7 @@ def _scan(text: str, i: int = 0, closer: str | None = None) -> _Scanned:
                     out.append(text[i : i + 2])
                     i += 2
                 elif d == "`" or (d == "$" and text[i + 1 : i + 2] != '"'):
-                    i, closed = _expansion(text, i, out, scanned.nested)
+                    i, closed = _expansion(text, i, out, scanned)
                     scanned.ok = scanned.ok and closed
                 else:
                     out.append(d)
@@ -533,7 +622,7 @@ def _scan(text: str, i: int = 0, closer: str | None = None) -> _Scanned:
             else:
                 scanned.ok = False
         elif c in "$`":
-            i, closed = _expansion(text, i, out, scanned.nested)
+            i, closed = _expansion(text, i, out, scanned)
             scanned.ok = scanned.ok and closed
         elif c == "#" and (i == 0 or text[i - 1] in _COMMENT_START):
             j = text.find("\n", i)
@@ -795,6 +884,7 @@ class _Check:
         self.extra_starts: list[Path] = []  # recursion starts of `**` globs
         self.long_wild = False  # an over-long candidate starts with a wildcard
         self.seen: set[tuple[str, bool]] = set()  # candidate spellings already listed
+        self.literals: list[list[str]] = []  # R19 substitution outputs, by global index
         self.folded = fold(command)
         root = scope.env.get(ENV_PLUGIN_ROOT)
         self.plugin_root = canonical(root, self.home) if root else None
@@ -814,6 +904,15 @@ class _Check:
         if depth > MAX_DEPTH:
             raise _Unconfident
         scanned = _scan(text)
+        if scanned.literals:  # renumber R19 outputs into this check's list
+            offset = len(self.literals)
+            self.literals.extend(scanned.literals)
+
+            def renumber(match: re.Match[str]) -> str:
+                return f"{_VAR}{_LIT}{int(match.group(1)) + offset}{_END}"
+
+            scanned.marked = _LOCAL_REF.sub(renumber, scanned.marked)
+            scanned.literal = [_LOCAL_REF.sub(renumber, body) for body in scanned.literal]
         tokens, lexed = _lex(scanned.marked)
         if not (scanned.ok and lexed):
             self.unconfident = True
@@ -908,6 +1007,8 @@ class _Check:
     def _values(self, name: str, bindings: dict[str, list[str]], depth: int) -> list[str]:
         if depth > 8:
             return [WILD]
+        if name.startswith(_LIT):
+            return list(self.literals[int(name[1:])])
         if name in bindings:
             out: list[str] = []
             for value in bindings[name]:
@@ -1017,7 +1118,7 @@ class _Check:
     def _is_plugin_root(self, text: str) -> bool:
         if self.plugin_root is None or WILD in text or not text.startswith("/"):
             return False
-        return canonical(text) == self.plugin_root
+        return all(r == self.plugin_root for r in _readings(text, Path("/")))
 
     def _exempt(self, candidate: _Candidate) -> bool:
         """The exact `--from` value after `uvx`, when it is the plugin root."""
@@ -1057,18 +1158,20 @@ class _Check:
                     if WILD in place or any(c in _GLOB_CHARS for c in place):
                         pattern = place.replace(WILD, "*")
                         for match in itertools.islice(glob.iglob(pattern), MAX_BASES + 1):
-                            self._add_base(canonical(match))
+                            for reading in _readings(match, base):
+                                self._add_base(reading)
                     else:
-                        self._add_base(canonical(place))
+                        for reading in _readings(place, base):
+                            self._add_base(reading)
             for candidate in self.candidates:
                 if not candidate.whole or WILD in candidate.text:
                     continue
                 if any(c in _GLOB_CHARS for c in candidate.text):
                     continue
                 for base in list(self.bases):
-                    path = canonical(self._absolute(candidate.text, base))
-                    if path.is_dir():
-                        self._add_base(path)
+                    for path in _readings(candidate.text, base):
+                        if path.is_dir():
+                            self._add_base(path)
 
     def _add_base(self, path: Path) -> None:
         if path not in self.bases:
@@ -1077,9 +1180,9 @@ class _Check:
             self.bases.append(path)
 
     def resolved(self, candidate: _Candidate) -> list[Path]:
-        if candidate.text.startswith("/"):
-            return [canonical(candidate.text)]
-        return [canonical(os.path.join(base, candidate.text)) for base in self.bases]
+        """Both readings (ruling R22) of the candidate against every base."""
+        bases = [Path("/")] if candidate.text.startswith("/") else self.bases
+        return [r for base in bases for r in _readings(candidate.text, base)]
 
     # -------------------------------------------------------------------- rules
 
@@ -1095,7 +1198,7 @@ class _Check:
                     ):
                         return guard
         if self.unconfident:
-            text = self.folded
+            text = self._unconfident_text()
             if any(_delimited(word, text) for word in (*agents, "copier")):
                 return guard
         replacers = {
@@ -1117,7 +1220,7 @@ class _Check:
             bases = [Path("/")] if text.startswith("/") else self.bases
             for base in bases:
                 prefix, _ = _split_pattern(self._absolute(text, base))
-                if self.targets.is_guard_file(canonical(prefix)):
+                if any(self.targets.is_guard_file(r) for r in _readings(prefix, base)):
                     return guard
         return None
 
@@ -1144,10 +1247,11 @@ class _Check:
         bases = [Path("/")] if candidate.text.startswith("/") else self.bases
         for base in bases:
             pattern = self._absolute(candidate.text, base).replace(WILD, "*")
-            for match in itertools.islice(glob.iglob(pattern), GLOB_LIMIT + 1):
-                matches.append(canonical(match))
-                if len(matches) > GLOB_LIMIT:
-                    raise _Unconfident
+            for spelling in dict.fromkeys([pattern, os.path.normpath(pattern)]):
+                for match in itertools.islice(glob.iglob(spelling), GLOB_LIMIT + 1):
+                    matches.extend(_readings(match, base))
+                    if len(matches) > GLOB_LIMIT:
+                        raise _Unconfident
         return matches
 
     def data_rules(self) -> Denial | None:
@@ -1177,12 +1281,16 @@ class _Check:
         if denial is not None:
             return denial
         if self.unconfident:  # rule 8
-            text = self.folded
+            text = self._unconfident_text()
             for root in roots:
                 names = {Path(root.path).name, os.path.basename(root.configured.rstrip("/"))}
                 if any(name and _delimited(fold(name), text) for name in names):
                     return Denial("data-guard", UNCONFIDENT_MESSAGE)
         return self._recursion()  # rule 6
+
+    def _unconfident_text(self) -> str:
+        """The raw text plus every expanded candidate (an R19 output can spell a name)."""
+        return "\n".join([self.folded, *(fold(c.text) for c in self.candidates)])
 
     def _textual(self) -> ProtectedRoot | None:
         """Rule 7: a root's spelling (configured, ~-expanded or canonical) in the raw text."""
@@ -1218,7 +1326,7 @@ class _Check:
             if "**" in text:  # a recursive glob, which zsh's `***` even follows
                 for base in bases:
                     prefix, _ = _split_pattern(self._absolute(text, base))
-                    self.extra_starts.append(canonical(prefix))
+                    self.extra_starts.extend(_readings(prefix, base))
             for match in self._glob(candidate):
                 root = self.targets.containing(match)
                 if root is not None:
@@ -1230,18 +1338,18 @@ class _Check:
         if ".." in rest:
             return Denial("data-guard", UNCONFIDENT_MESSAGE)
         rest = [part for part in rest if part not in ("", ".")]
-        start = canonical(prefix)
-        root = self.targets.containing(start)
-        if root is not None:
-            return data_denial(root, SUBJECT)
-        start_key = fold(start).rstrip(os.sep)
-        for root in self.targets.under(start):
-            relative = fold(root.path)[len(start_key) + 1 :].split(os.sep)
-            if any("**" in part for part in rest):
+        for start in _readings(prefix, Path("/")):
+            root = self.targets.containing(start)
+            if root is not None:
                 return data_denial(root, SUBJECT)
-            parts = [fold(part.replace(WILD, "*")) for part in rest]
-            if all(fnmatch.fnmatchcase(r, p) for r, p in zip(relative, parts, strict=False)):
-                return data_denial(root, SUBJECT)
+            start_key = fold(start).rstrip(os.sep)
+            for root in self.targets.under(start):
+                relative = fold(root.path)[len(start_key) + 1 :].split(os.sep)
+                if any("**" in part for part in rest):
+                    return data_denial(root, SUBJECT)
+                parts = [fold(part.replace(WILD, "*")) for part in rest]
+                if all(fnmatch.fnmatchcase(r, p) for r, p in zip(relative, parts, strict=False)):
+                    return data_denial(root, SUBJECT)
         return None
 
     def _links_created(self) -> Denial | None:
@@ -1255,11 +1363,11 @@ class _Check:
             for candidate in mine:
                 bases = [Path("/")] if candidate.text.startswith("/") else [*self.bases, *places]
                 for base in bases:
-                    path = canonical(self._absolute(candidate.text, base))
-                    root = self.targets.containing(path)
-                    under = self.targets.under(path)
-                    if root is not None or under:
-                        return data_denial(root or under[0], SUBJECT)
+                    for path in _readings(candidate.text, base):
+                        root = self.targets.containing(path)
+                        under = self.targets.under(path)
+                        if root is not None or under:
+                            return data_denial(root or under[0], SUBJECT)
         return None
 
     def _recursion(self) -> Denial | None:
@@ -1355,6 +1463,16 @@ class _Check:
         if self.targets.roots:
             return self.data_rules()
         return None
+
+
+def _readings(p: str, base: Path) -> list[Path]:
+    """Ruling R22: `p` against `base`, resolved physically (`canonical`, links before `..`)
+    and, as an extra reading, textually (`..` collapsed first, as a logical `cd` does).
+    The physical reading always comes first and is never dropped."""
+    absolute = p if p.startswith("/") else os.path.join(base, p)
+    physical = canonical(absolute)
+    textual = canonical(os.path.normpath(absolute))
+    return [physical] if textual == physical else [physical, textual]
 
 
 def _raw_runs(text: str) -> Iterator[str]:

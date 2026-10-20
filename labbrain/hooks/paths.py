@@ -103,8 +103,9 @@ def sticky_pieces(token: str) -> list[str]:
 
 
 def fold(p: Path | str) -> str:
-    """The comparison key for a path spelling: NFC-normalized, then casefolded."""
-    return unicodedata.normalize("NFC", str(p)).casefold()
+    """The comparison key for a path spelling: NFC-normalized, casefolded, and NFC-normalized
+    again, because casefolding can decompose (U+01F0 folds to j + U+030C)."""
+    return unicodedata.normalize("NFC", unicodedata.normalize("NFC", str(p)).casefold())
 
 
 def _identity(path: Path | str) -> tuple[int, int] | None:

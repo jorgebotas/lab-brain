@@ -224,3 +224,14 @@ def test_path_runs_and_sticky_pieces() -> None:
     assert paths.sticky_pieces("[./v]") == ["./v"]
     assert paths.sticky_pieces("a@b/c+~d$.e") == ["b/c", "~d", ".e"]
     assert paths.path_like("x.y") and not paths.path_like("xy") and not paths.path_like("")
+
+
+def test_fold_is_normalized_after_casefold() -> None:
+    """`fold` is NFC(casefold(NFC(x))): casefolding U+01F0 (j with caron) yields the
+    decomposed j + U+030C, which fold composes again."""
+    import unicodedata
+
+    folded = fold("/x/ǰ")
+    assert folded == "/x/ǰ"
+    assert unicodedata.is_normalized("NFC", folded)
+    assert fold("/x/J̌") == fold("/x/ǰ") == folded

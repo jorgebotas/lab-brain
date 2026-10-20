@@ -35,4 +35,13 @@ A smoke job on every PR (cost per push); recorded transcripts (they would not ex
 
 Automatic skill invocation (`brain-core`, `handoff`) is checked only by the manual checklist, because bare mode sends no skill listing.
 
-**Unverified as of 0.2.0.** Two behaviours have not been observed in a real run: whether a skill's `allowed-tools` is honoured under `--permission-mode dontAsk`, and whether `--bare` loads the plugin from `--plugin-dir`. The build environment had no API key, so no smoke test or gate run has happened yet; the user runs them. Until a run is recorded here, neither outcome may be assumed.
+**Observed 2026-10-20** (Claude Code 2.1.284, macOS, login mode `LABBRAIN_SMOKE_LOGIN=1` with `LABBRAIN_SMOKE_REQUIRED=1`, `LABBRAIN_SMOKE_ALLOW_ENGINE` unset):
+- All three smoke tests passed: `idea`, `exp-log --parent`, and `exp-log` without a protocol.
+- **A skill's own `allowed-tools` rule is honoured under `--permission-mode dontAsk`.** The engine calls ran with no permission denials, and the harness fails on any denial.
+
+**Still unverified:**
+- whether `--bare` loads the plugin from `--plugin-dir` (that needs `ANTHROPIC_API_KEY`; login mode does not use `--bare`);
+- whether read-only `git` calls in the handoff skill are auto-allowed;
+- whether a multi-line single-quoted `--body` matches the engine permission rule.
+
+Record those outcomes here when they are observed.

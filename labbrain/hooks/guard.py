@@ -203,10 +203,11 @@ def _glob(args: dict[str, Any], cwd: Path, scope: Scope, subject: str) -> Denial
 def _glob_bases(pattern: str, start: Path, env: Mapping[str, str]) -> list[Path]:
     """Every directory a Glob of `pattern` from `start` may search from.
 
-    `start` itself; each run of the pattern's literal leading directories joined to it (the
-    pattern read relative, `/`-anchored, or with leading components that repeat the end of
-    `start` stripped); and for an absolute or `~` pattern, its literal prefix and every
-    parent of it, `/` included.
+    `start` itself and, for an absolute or `~` pattern, where Claude Code starts ripgrep (R21):
+    the deepest literal directory before the first wildcard component, or for a fully
+    literal pattern its parent and the path itself. Each run of the pattern's literal leading
+    directories is also joined to every such base (the pattern read relative, `/`-anchored,
+    or with leading components that repeat the end of `path` stripped).
     """
     parts = pattern.split(os.sep)
     if "\\" in pattern or any(part.startswith("!") for part in parts):
@@ -217,14 +218,12 @@ def _glob_bases(pattern: str, start: Path, env: Mapping[str, str]) -> list[Path]
     names = [part for part in parts[:cut] if part not in ("", ".")]
     if len(names) > MAX_GLOB_NAMES:
         raise _Unsure
-    bases = [start]
-    bases += [
-        start.joinpath(*names[i:j]) for i in range(len(names)) for j in range(i + 1, len(names) + 1)
-    ]
+    anchors = [start]
     if pattern.startswith((os.sep, "~")) and cut > 0:
         prefix = Path(_expand_home(os.sep.join(parts[:cut]) or os.sep, env))
-        bases += [prefix, *prefix.parents]
-    return bases
+        anchors += [prefix.parent, prefix] if cut == len(parts) else [prefix]
+    runs = [names[i:j] for i in range(len(names)) for j in range(i + 1, len(names) + 1)]
+    return anchors + [anchor.joinpath(*run) for anchor in anchors for run in runs]
 
 
 def _expand_home(text: str, env: Mapping[str, str]) -> str:

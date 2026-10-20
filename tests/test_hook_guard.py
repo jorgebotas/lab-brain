@@ -253,9 +253,11 @@ def test_glob_absolute_into_root_denied(world: World) -> None:
     # before it, at any depth: these reach the root from its parent.
     for pattern in ("*.csv", "rows.csv", "d*"):
         denied(world, "Glob", {"pattern": f"{world.tmp}/{pattern}"})
-    # Every directory prefix of an absolute pattern is a base, `/` included.
-    denied(world, "Glob", {"pattern": f"{world.vault}/notes/*.md"})
-    denied(world, "Glob", {"pattern": "/notes/*.md", "path": str(world.vault)})
+    denied(world, "Glob", {"pattern": f"{world.phi}"})  # fully literal: the path itself
+    # R21: only the deepest literal directory is a base, not its parents such as `/`.
+    allowed(world, "Glob", {"pattern": f"{world.vault}/notes/*.md"})
+    allowed(world, "Glob", {"pattern": f"{world.vault}/notes/n.md"})
+    allowed(world, "Glob", {"pattern": "/notes/*.md", "path": str(world.vault)})
 
 
 def test_glob_recursive_bases(world: World) -> None:
@@ -480,6 +482,7 @@ def test_home_relative_root(world: World, monkeypatch: pytest.MonkeyPatch) -> No
     denied(world, "Glob", {"pattern": "*/*.csv", "path": str(world.home)}, entry=entry)
     denied(world, "Glob", {"pattern": "/d*", "path": str(world.home)}, entry=entry)  # from `/`
     allowed(world, "Glob", {"pattern": "*/*.csv", "path": str(world.home / "other")})
+    allowed(world, "Glob", {"pattern": "~/other/*.py"}, cwd=world.vault)
     denied(world, "Glob", {"pattern": f"~nosuchuser{secrets.token_hex(4)}/*"}, entry=entry)
     for tool, args in (
         ("Glob", {"path": str(world.home)}),
@@ -628,5 +631,6 @@ def test_glob_home_from_hook_env(world: World, monkeypatch: pytest.MonkeyPatch) 
     entry = (1, str(home_phi))
     denied(world, "Glob", {"pattern": "~/phi/*.csv"}, entry=entry)
     denied(world, "Glob", {"pattern": "~/*/*.csv"}, entry=entry)
-    denied(world, "Glob", {"pattern": "~/notes/*.md"}, entry=entry)  # `~` is a base: recursive
+    allowed(world, "Glob", {"pattern": "~/notes/*.md"})  # R21: the base is ~/notes
+    allowed(world, "Glob", {"pattern": "~/code/*.py"})
     allowed(world, "Glob", {"pattern": "*.md", "path": str(world.home / "notes")})

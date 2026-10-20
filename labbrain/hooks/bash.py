@@ -307,16 +307,21 @@ _SEPARATORS = set(";|()&\n")
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _ASSIGN = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)(\+?)=")
 _SPECIAL = set("?#$!@*-0123456789")
-# Ruling R27b: special parameters. `$? $# $$ $! $-` are digits or option letters: the
-# pre-pass marks them _NUMERIC. `$0`-`$9`, `${n}` and `$@` each hold one word of the command
-# (or WILD): marked _POSITIONAL. `$*` joins them all with IFS: WILD. `_params` resolves the
-# marks of each word once it is lexed.
-_NUMERIC = "\ue005"
+# Ruling R27b: special parameters. `$?`, `$#` and `$$` are digits: the pre-pass marks them
+# _DIGITS. `$!` (digits, or empty) and `$-` (option letters) are marked _LETTERS. `$0`-`$9`,
+# `${n}` and `$@` each hold one word of the command (or WILD): marked _POSITIONAL. `$*`
+# joins them all with IFS: WILD. The marks survive binding (R29: `rc=$?`, `for f in "$@"`)
+# and `_params` resolves them where a word is used, after expansion.
+_DIGITS = "\ue005"
 _POSITIONAL = "\ue006"
-_NUMERIC_PARAMS = frozenset("?#$!-")
-_PARAM_MARK = re.compile(f"[{_NUMERIC}{_POSITIONAL}]")
-_NOT_PATH_TEXT = frozenset(" \t\r\n=:,") | {_NUMERIC}  # may sit next to a numeric mark
-_MARKS = re.compile("[\ue000-\ue006]")  # the pre-pass's own marks: never in a command
+_LETTERS = "\ue007"
+_DIGIT_PARAMS = frozenset("?#$")
+_LETTER_PARAMS = frozenset("!-")
+_SHORT_PARAMS = {**dict.fromkeys(_DIGIT_PARAMS, _DIGITS), **dict.fromkeys(_LETTER_PARAMS, _LETTERS)}
+_SHORT_PARAMS.update({"*": WILD, "@": _POSITIONAL})
+_SHORT_PARAMS.update(dict.fromkeys("0123456789", _POSITIONAL))
+_PARAM_MARKS = _DIGITS + _LETTERS
+_MARKS = re.compile("[\ue000-\ue007]")  # the pre-pass's own marks: never in a command
 # Ruling R19b: a whole-word `"$(cat <<'EOF' … EOF)"` stands for its literal heredoc body;
 # the pre-pass marks it _VAR _LOCAL k _END, which _Check.parse renumbers _VAR _LIT k _END.
 _LOCAL = "\ue004"
@@ -493,12 +498,10 @@ def _expansion(
         content = text[i + 2 : j]
         if _NAME.fullmatch(content):
             out.append(_VAR + content + _END)
-        elif len(content) == 1 and content in _NUMERIC_PARAMS:
-            out.append(_NUMERIC)
-        elif content == "@" or (content.isascii() and content.isdigit()):
+        elif len(content) == 1 and content in _SHORT_PARAMS:
+            out.append(_SHORT_PARAMS[content])
+        elif content.isascii() and content.isdigit():
             out.append(_POSITIONAL)
-        elif content == "*":
-            out.append(WILD)
         else:  # ${X:-…}, ${#X}, ${X/a/b}…: the value is not known
             out.append(WILD)
             nested.append(content)
@@ -517,7 +520,7 @@ def _expansion(
         out.append(_VAR + match.group() + _END)
         return match.end(), True
     if nxt and nxt in _SPECIAL:  # $? $# $$ $! $- / $0-$9 $@ / $*: see _params
-        out.append(_NUMERIC if nxt in _NUMERIC_PARAMS else WILD if nxt == "*" else _POSITIONAL)
+        out.append(_SHORT_PARAMS[nxt])
         return i + 2, True
     out.append("$")
     return i + 1, True
@@ -990,11 +993,6 @@ class _Check:
         bindings: dict[str, list[str]] = {}
         nested = list(scanned.nested)
         for words, targets in _simple_commands(tokens):
-            programs = {view.pos for view in _views(words)}  # `$0 -p hi` runs a word: WILD
-            words = [
-                WILD if k in programs and word == _POSITIONAL else _params(word)
-                for k, word in enumerate(words)
-            ]
             simple = self._simple(words, bindings, targets)
             if literal_form:
                 self.literal_forms.add(len(self.simples))
@@ -1021,6 +1019,7 @@ class _Check:
                 break
         else:
             expanded = [self._expand(w, bindings) for w in words]
+        expanded = self._resolve_params(words, expanded)
         simple = _Simple(words, expanded, [], targets=targets)
         simple.views = _views(simple.first)
         for view in simple.views:
@@ -1037,6 +1036,36 @@ class _Check:
             if match and match.group(1) in DANGEROUS_ASSIGNMENTS:
                 self.dangerous = True
         return simple
+
+    @staticmethod
+    def _resolve_params(words: list[str], expanded: list[list[str]]) -> list[list[str]]:
+        """R27b and R29: the special-parameter marks of each expanded word, resolved at the
+        point of use. A positional parameter alone in program position (`$0 -p hi`) is
+        WILD; an assignment (`rc=$?`, before the program or after `export` and its kin)
+        resolves its value on its own, the name being no path."""
+        first = [alts[0] if alts else "" for alts in expanded]
+        views = _views(words) + _views(first)
+        programs = {view.pos for view in views}
+        assignments: set[int] = set()
+        for k, word in enumerate(words):
+            if not _ASSIGN.match(word):
+                break
+            assignments.add(k)
+        for view in views:
+            if view.name in EXPORTERS:
+                assignments.update(
+                    k for k in range(view.pos + 1, len(words)) if _ASSIGN.match(words[k])
+                )
+
+        def resolve(k: int, value: str) -> str:
+            if k in programs and value == _POSITIONAL:
+                return WILD
+            match = _ASSIGN.match(value) if k in assignments else None
+            if match:
+                return value[: match.end()] + _params(value[match.end() :])
+            return _params(value)
+
+        return [[resolve(k, value) for value in alts] for k, alts in enumerate(expanded)]
 
     def _from_value(self, words: Sequence[str], pos: int) -> set[int]:
         """The position of the `--from` value of the `uvx` at `pos`."""
@@ -1200,7 +1229,7 @@ class _Check:
         exempt_runs = sum(len(simple.exempt) for simple in self.simples)
         for body, bindings in self.raw:
             for run in path_runs(body):
-                for alternative in self._expand(_params(run), bindings):
+                for alternative in map(_params, self._expand(run, bindings)):
                     for piece, whole in self._pieces(alternative):
                         if not piece:
                             continue
@@ -1631,27 +1660,22 @@ _readings = readings  # ruling R22's two readings, under the name this module ha
 
 
 def _params(word: str) -> str:
-    """Ruling R27b: `word` (lexed, or a raw-text run) with its special-parameter marks
-    resolved to `_` (no path can come of it) or WILD.
+    """Rulings R27b and R29: an expanded `word` (or value) with its special-parameter marks
+    resolved where it is used.
 
-    A positional parameter alone (`$1`, `"$@"`) holds one word of the command, which is a
-    candidate in its own right: `_`. Joined to anything, another parameter included
-    (`$1$2`), it is WILD. A numeric one (digits or option letters) is `_` unless path text
-    is next to it: anything but blanks, `=`, `:`, `,` or another numeric parameter."""
-    if _NUMERIC not in word and _POSITIONAL not in word:
-        return word
-    if word == _POSITIONAL:
-        return "_"
-    last = len(word) - 1
-
-    def resolve(match: re.Match[str]) -> str:
-        k = match.start()
-        if match.group() == _POSITIONAL:
-            return WILD
-        near = (word[k - 1] if k else " ", word[k + 1] if k < last else " ")
-        return "_" if all(c in _NOT_PATH_TEXT for c in near) else WILD
-
-    return _PARAM_MARK.sub(resolve, word)
+    A word made only of `$? $# $$ $! $-` names no path: each is `_`. Joined to anything
+    else, each is a glob of what it can hold, `[0-9]*` for the digits of `$?`, `$#` and
+    `$$`, `*` for `$!` (maybe empty) and `$-`: rule 5 judges it like any glob, and since it
+    can hold no `/` or `..` it does not deny as a leading WILD would. A positional
+    parameter alone (`$1`, `"$@"`) holds one word of the command, a candidate in its own
+    right: `_`. Joined to anything, another parameter included (`$1$2`), it is WILD."""
+    if word == _POSITIONAL or (word and not word.strip(_PARAM_MARKS)):
+        return "_" * len(word)
+    if _DIGITS in word:
+        word = word.replace(_DIGITS, "[0-9]*")
+    if _LETTERS in word:
+        word = word.replace(_LETTERS, "*")
+    return word.replace(_POSITIONAL, WILD) if _POSITIONAL in word else word
 
 
 def _delimited(word: str, text: str, *, loose: bool = False) -> bool:

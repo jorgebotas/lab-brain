@@ -349,3 +349,75 @@ def test_update_frontmatter_keeps_a_bom(tmp_path: Path) -> None:
 def test_decode_note_translates_newlines() -> None:
     """Files and git blobs decode the same way, so a CR-only note still parses at base."""
     assert decode_note(b"\xef\xbb\xbf---\rid: x\r\n---\r") == "---\nid: x\n---\n"
+
+
+def test_impossible_dates_are_invalid_yaml_not_a_crash() -> None:
+    note = parse("---\nid: x\ncreated: 2026-02-30\n---\nSee [[EXP-20261001-baseline]].\n")
+    assert note.data is None
+    assert note.errors == ["frontmatter is not valid YAML (line 1)"]
+    assert [r.target for r in note.refs] == ["EXP-20261001-baseline"]
+
+
+@pytest.mark.parametrize("value", [1e-07, 1e20, -2e-10, 1.5e-07, 0.85, 3.0])
+def test_tool_written_floats_read_back_as_floats(tmp_path: Path, value: float) -> None:
+    from labbrain.notes import dump_frontmatter, safe_load
+
+    loaded = safe_load(dump_frontmatter({"value": value, "nested": [{"v": value}]}))
+    assert loaded == {"value": value, "nested": [{"v": value}]}
+    assert type(loaded["value"]) is float
+    path = tmp_path / "note.md"
+    path.write_text(SAMPLE)
+    update_frontmatter(path, {"score": value})
+    assert parse_note(path, tmp_path).get("score") == value
+
+
+def test_alias_fan_out_is_walked_once_and_cycles_are_refused() -> None:
+    import time
+
+    from labbrain.notes import UnreadableValueError, safe_load
+
+    levels = ["l0: &l0 [x, y]"] + [f"l{i}: &l{i} [*l{i - 1}, *l{i - 1}]" for i in range(1, 25)]
+    started = time.perf_counter()
+    assert safe_load("\n".join(levels))["l1"] == [["x", "y"], ["x", "y"]]
+    assert time.perf_counter() - started < 2
+    for text in ("tags: &a [*a]\n", "a: &x {b: *x}\n"):
+        with pytest.raises(UnreadableValueError):
+            safe_load(text)
+
+
+def test_well_formed_is_linear_in_shared_containers() -> None:
+    """Shared anchors reached at many depths are walked once (their height is memoised)."""
+    import time
+
+    import yaml
+
+    from labbrain.notes import _StrictLoader, well_formed
+
+    n = 190
+    lines = ["l0: &l0 [x]"] + [
+        f"l{i}: &l{i} [" + ", ".join(f"*l{j}" for j in reversed(range(i))) + "]"
+        for i in range(1, n)
+    ]
+    lines.append("z: [" + ", ".join(f"*l{j}" for j in range(n)) + "]")
+    data = yaml.load("\n".join(lines), Loader=_StrictLoader)
+    started = time.perf_counter()
+    assert well_formed(data)
+    assert time.perf_counter() - started < 0.1
+
+
+def test_well_formed_depth_cap_and_cycles() -> None:
+    from labbrain.notes import MAX_DEPTH, well_formed
+
+    def nested(depth: int) -> list:
+        value: list = []
+        for _ in range(depth - 1):
+            value = [value]
+        return value
+
+    assert well_formed(nested(MAX_DEPTH))
+    assert not well_formed(nested(MAX_DEPTH + 1))
+    shared = nested(MAX_DEPTH - 1)
+    assert well_formed([shared, shared]) and not well_formed([[shared], shared])
+    loop: list = []
+    loop.append(loop)
+    assert not well_formed({"a": loop})

@@ -9,6 +9,7 @@ YAML input.
 
 from __future__ import annotations
 
+import errno
 import io
 import os
 import re
@@ -25,6 +26,7 @@ import yaml
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from ruamel.yaml.error import YAMLError as RuamelYAMLError
+from ruamel.yaml.representer import RoundTripRepresenter
 from ruamel.yaml.scalarstring import SingleQuotedScalarString
 
 from labbrain.schema import FUTURE_AGENTS_HEADING, ID_FIELDS, BaseNote, validate_frontmatter
@@ -67,18 +69,102 @@ class _StrictLoader(_LOADER):  # type: ignore[misc,valid-type]
         return super().construct_mapping(node, deep=deep)
 
 
+class UnreadableValueError(yaml.YAMLError):
+    """Well-formed YAML holding a value the loader cannot build: an impossible date
+    (`2026-02-30`), or nesting too deep to construct. Carries no position or text."""
+
+
+# Deeper data is refused: no real frontmatter or run config nests this far, and the
+# recursive code that walks loaded data (flatten, json.dumps, frozen-edit's comparison)
+# would hit Python's recursion limit.
+MAX_DEPTH = 200
+
+
+def _children(value: Mapping[Any, Any] | list[Any] | tuple[Any, ...]) -> list[Any]:
+    return [*value.keys(), *value.values()] if isinstance(value, Mapping) else list(value)
+
+
+def well_formed(data: Any) -> bool:
+    """True when loaded data nests at most MAX_DEPTH levels, has no cycle (a recursive
+    YAML alias makes one), and every string in it, key or value, encodes as UTF-8 (JSON
+    and YAML escapes can produce lone surrogates, which cannot be written).
+
+    The walk is iterative and memoises each container's height (by id), so a container
+    shared through aliases is walked once however many places reach it: linear time.
+    """
+    heights: dict[int, int] = {}  # id of a finished container -> levels at and below it
+    on_path: set[int] = set()
+    stack: list[tuple[Any, bool]] = [(data, False)]
+    while stack:
+        value, leaving = stack.pop()
+        if isinstance(value, str):
+            try:
+                value.encode("utf-8")
+            except UnicodeEncodeError:
+                return False
+            continue
+        if not isinstance(value, Mapping | list | tuple):
+            continue
+        key = id(value)
+        if leaving:
+            on_path.discard(key)
+            below = [heights[id(c)] for c in _children(value) if id(c) in heights]
+            height = 1 + max(below, default=0)
+            if height > MAX_DEPTH:
+                return False
+            heights[key] = height
+        elif key in on_path:
+            return False  # a cycle
+        elif key not in heights:
+            on_path.add(key)
+            stack.append((value, True))
+            stack.extend((child, False) for child in _children(value))
+    return True
+
+
 def safe_load(text: str) -> Any:
-    """Fast, safe YAML read. Raises yaml.YAMLError on invalid input or duplicate keys."""
-    return yaml.load(text, Loader=_StrictLoader)  # safe: subclass of (C)SafeLoader
+    """Fast, safe YAML read. Raises yaml.YAMLError on invalid input or duplicate keys,
+    and UnreadableValueError (also a yaml.YAMLError) for values that cannot be built or
+    walked: an impossible date, a recursive alias, nesting deeper than MAX_DEPTH."""
+    try:
+        data = yaml.load(text, Loader=_StrictLoader)  # safe: subclass of (C)SafeLoader
+    except yaml.YAMLError:
+        raise
+    except (ValueError, TypeError, RecursionError):
+        # The constructor's message can name the value; `from None` drops it.
+        raise UnreadableValueError("a value cannot be read") from None
+    if not well_formed(data):
+        raise UnreadableValueError("a value cannot be read")
+    return data
 
 
 _YAML11_RESOLVER = yaml.resolver.Resolver()
 _STR_TAG = "tag:yaml.org,2002:str"
+_FLOAT_TAG = "tag:yaml.org,2002:float"
+
+
+class _Yaml11Float(float):
+    """A float whose repr has an exponent but no point (`1e-07`), which YAML 1.1 (PyYAML)
+    reads as a string; it is written as `1.0e-07`, a float under both YAML 1.1 and 1.2."""
+
+
+def _represent_yaml11_float(representer: RoundTripRepresenter, value: float) -> Any:
+    mantissa, exponent = repr(float(value)).split("e")
+    return representer.represent_scalar(_FLOAT_TAG, f"{mantissa}.0e{exponent}")
+
+
+RoundTripRepresenter.add_representer(_Yaml11Float, _represent_yaml11_float)
+
+
+def _needs_point(value: float) -> bool:
+    text = repr(value)
+    return "e" in text and "." not in text
 
 
 def _yaml11_safe(value: Any) -> Any:
     """`value` with every plain string PyYAML (YAML 1.1) would not read back as a string
-    single-quoted, recursing into lists and mappings.
+    single-quoted, and every float written as `1e-07` given a point, recursing into lists
+    and mappings.
 
     ruamel writes YAML 1.2, where ``yes``, ``No``, ``on`` or ``12:30`` are plain strings,
     but reads go through PyYAML, which resolves them to booleans and numbers. Only values
@@ -86,6 +172,8 @@ def _yaml11_safe(value: Any) -> Any:
     dumped as they were, so a frontmatter update never rewrites another field's line.
     Ruamel containers are updated in place so their flow style and comments survive.
     """
+    if type(value) is float and _needs_point(value):
+        return _Yaml11Float(value)
     if isinstance(value, str):
         if type(value) is str and (
             _YAML11_RESOLVER.resolve(yaml.ScalarNode, value, (True, False)) != _STR_TAG
@@ -414,21 +502,67 @@ def atomic_write(path: Path, text: str) -> None:
         raise
 
 
-def update_frontmatter(path: Path, updates: Mapping[str, Any]) -> bool:
-    """Set top-level frontmatter keys in place. Returns True if the file changed.
+# os.link errnos meaning "this filesystem cannot hard-link", not "the target exists".
+_NO_HARD_LINKS = frozenset(
+    code
+    for name in ("EPERM", "ENOTSUP", "EOPNOTSUPP", "EXDEV", "EMLINK", "ENOSYS")
+    if (code := getattr(errno, name, None)) is not None
+)
 
-    Line endings, sequence indentation, key order, comments and quoting are kept, so
+
+def atomic_create(path: Path, text: str) -> None:
+    """Like atomic_write, but never replace a file: raise FileExistsError instead.
+
+    The text is written to a temp file and hard-linked into place, so the note appears
+    complete or not at all, and two writers racing for one ID cannot overwrite each other.
+    Where the filesystem has no hard links, an exclusive create is used instead: it still
+    never replaces a file, but a crash mid-write can leave a partial note.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mode = _target_mode(path)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+        os.chmod(tmp, mode)
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            raise
+        except OSError as exc:
+            if exc.errno not in _NO_HARD_LINKS:
+                raise
+            _exclusive_write(path, text, mode)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+
+def _exclusive_write(path: Path, text: str, mode: int) -> None:
+    """Create `path` with O_EXCL (FileExistsError if it exists) and write text verbatim."""
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
+    fd = os.open(path, flags, mode)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+    except BaseException:
+        path.unlink(missing_ok=True)  # O_EXCL made this file ours; leave no partial note
+        raise
+
+
+def update_frontmatter_text(text: str, updates: Mapping[str, Any], *, name: str) -> str | None:
+    """`text` with top-level frontmatter keys set, or None if nothing changed.
+
+    Line endings, a BOM, sequence indentation, key order, comments and quoting are kept, so
     changing one scalar touches only that key's lines (a block value spans several).
     Written strings that YAML 1.1 would not read as strings are single-quoted; values
-    already in the file are written back unchanged. Errors name only the file and a line.
+    already in the file are written back unchanged. Errors (ValueError) name only `name`
+    (the file) and a line.
     """
-    with open(path, encoding="utf-8", newline="") as handle:
-        text = handle.read()
     bom = BOM if text.startswith(BOM) else ""
     text = text.removeprefix(BOM)
     match = _FM_RE.match(text)
     if match is None:
-        raise ValueError(f"{path.name} has no frontmatter to update")
+        raise ValueError(f"{name} has no frontmatter to update")
     crlf = text[: match.start("fm")].endswith("\r\n")
     frontmatter = match.group("fm").replace("\r\n", "\n")
     yaml = rt_yaml(seq_offset=_detect_seq_offset(frontmatter))
@@ -439,7 +573,7 @@ def update_frontmatter(path: Path, updates: Mapping[str, Any]) -> bool:
             data = yaml.load(frontmatter) or CommentedMap()
         except RuamelYAMLError as exc:
             line = _yaml_error_line(exc)
-            message = f"{path.name}: frontmatter cannot be updated (line {line})"
+            message = f"{name}: frontmatter cannot be updated (line {line})"
             raise ValueError(message) from None
         changed = False
         for key, value in updates.items():
@@ -448,11 +582,24 @@ def update_frontmatter(path: Path, updates: Mapping[str, Any]) -> bool:
             data[key] = _yaml11_safe(value)
             changed = True
         if not changed:
-            return False
+            return None
         buffer = io.StringIO()
         yaml.dump(data, buffer)
     dumped = buffer.getvalue()
     if crlf:
         dumped = dumped.replace("\n", "\r\n")
-    atomic_write(path, bom + text[: match.start("fm")] + dumped + text[match.end("fm") :])
+    return bom + text[: match.start("fm")] + dumped + text[match.end("fm") :]
+
+
+def update_frontmatter(path: Path, updates: Mapping[str, Any]) -> bool:
+    """Set top-level frontmatter keys in place. Returns True if the file changed.
+
+    See `update_frontmatter_text`; the file is rewritten atomically, and only on a change.
+    """
+    with open(path, encoding="utf-8", newline="") as handle:
+        text = handle.read()
+    updated = update_frontmatter_text(text, updates, name=path.name)
+    if updated is None:
+        return False
+    atomic_write(path, updated)
     return True

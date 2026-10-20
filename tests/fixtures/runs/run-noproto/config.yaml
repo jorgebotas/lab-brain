@@ -1,0 +1,12 @@
+model:
+  name: convnet
+  depth: 4
+  dropout: 0.1
+optim:
+  lr: 0.0003
+loss:
+  label_smoothing: 0.1
+data:
+  dataset: DS-20260801-main-split
+  fold: 0
+seed: 3

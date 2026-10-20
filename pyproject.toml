@@ -1,6 +1,6 @@
 [project]
 name = "labbrain"
-dynamic = ["version"]
+version = "0.2.0"
 description = "Deterministic core of lab-brain: schemas, IDs, validation, lint and PHI scanning for ML research vaults"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -19,9 +19,6 @@ labbrain = "labbrain.cli:run"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.hatch.version]
-path = "labbrain/__init__.py"
-
 [tool.hatch.build.targets.wheel]
 packages = ["labbrain"]
 
@@ -33,6 +30,8 @@ only-include = [
     "tests",
     "docs",
     "scripts",
+    "skills",
+    ".claude-plugin",
     "README.md",
     "LICENSE",
     "CHANGELOG.md",
@@ -49,7 +48,9 @@ testpaths = ["tests"]
 markers = [
     "slow: performance-budget tests",
     "network: needs network access (pre-commit try-repo)",
+    "smoke: headless Claude Code runs; need claude plus ANTHROPIC_API_KEY or LABBRAIN_SMOKE_LOGIN=1",
 ]
+addopts = ["-m", "not smoke"]
 
 [tool.coverage.run]
 source = ["labbrain"]
@@ -61,6 +62,8 @@ include = [
     "*/labbrain/vault.py",
     "*/labbrain/phi.py",
     "*/labbrain/lint/*",
+    "*/labbrain/trackers/*",
+    "*/labbrain/experiments.py",
 ]
 show_missing = true
 
@@ -72,3 +75,7 @@ extend-exclude = ["docs"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 ignore = ["E501"]  # the formatter owns line length; long literals (hashes) cannot wrap
+
+[tool.uv]
+# uvx --from <checkout> (how the plugin runs the engine) rebuilds only when these change.
+cache-keys = [{ file = "pyproject.toml" }, { file = "labbrain/**/*.py" }]

@@ -58,7 +58,12 @@ def test_conflicting_supersession_is_reported_not_written(tmp_path: Path) -> Non
         write(
             root,
             f"decisions/ADR-20261002-{name}.md",
-            note_text(f"ADR-20261002-{name}", "decision", supersedes="ADR-20261001-old"),
+            note_text(
+                f"ADR-20261002-{name}",
+                "decision",
+                status="accepted",
+                supersedes="ADR-20261001-old",
+            ),
         )
     changes, conflicts = plan(Vault.load(root))
     assert changes == []
@@ -79,7 +84,11 @@ def test_already_superseded_by_someone_else(tmp_path: Path) -> None:
         root,
         "decisions/ADR-20261002-b.md",
         note_text(
-            "ADR-20261002-b", "decision", supersedes="ADR-20261001-old", body=body_for("decision")
+            "ADR-20261002-b",
+            "decision",
+            status="accepted",
+            supersedes="ADR-20261001-old",
+            body=body_for("decision"),
         ),
     )
     changes, conflicts = plan(Vault.load(root))
@@ -107,7 +116,7 @@ def test_conflict_message_hides_a_value_that_is_not_id_shaped(tmp_path: Path) ->
     write(
         root,
         "decisions/ADR-20261002-b.md",
-        note_text("ADR-20261002-b", "decision", supersedes="ADR-20261001-old"),
+        note_text("ADR-20261002-b", "decision", status="accepted", supersedes="ADR-20261001-old"),
     )
     _, conflicts = plan(Vault.load(root))
     assert "Jane" not in conflicts[0].message
@@ -124,7 +133,13 @@ def test_protocol_target_cannot_be_superseded(tmp_path: Path) -> None:
     write(
         root,
         "decisions/ADR-20261002-b.md",
-        note_text("ADR-20261002-b", "decision", supersedes="EVAL-v1", body=body_for("decision")),
+        note_text(
+            "ADR-20261002-b",
+            "decision",
+            status="accepted",
+            supersedes="EVAL-v1",
+            body=body_for("decision"),
+        ),
     )
     vault = Vault.load(root)
     changes, conflicts = plan(vault)
@@ -142,7 +157,7 @@ def test_target_of_unknown_type_cannot_be_superseded(tmp_path: Path) -> None:
     write(
         root,
         "decisions/ADR-20261002-b.md",
-        note_text("ADR-20261002-b", "decision", supersedes="ADR-20261001-old"),
+        note_text("ADR-20261002-b", "decision", status="accepted", supersedes="ADR-20261001-old"),
     )
     changes, conflicts = plan(Vault.load(root))
     assert changes == []
@@ -163,7 +178,7 @@ def test_conflict_message_hides_an_identifier_shaped_value(tmp_path: Path) -> No
     write(
         root,
         "decisions/ADR-20261002-b.md",
-        note_text("ADR-20261002-b", "decision", supersedes="ADR-20261001-old"),
+        note_text("ADR-20261002-b", "decision", status="accepted", supersedes="ADR-20261001-old"),
     )
     _, conflicts = plan(Vault.load(root))
     assert ssn not in conflicts[0].message
@@ -175,7 +190,9 @@ def test_self_supersession_is_a_conflict(tmp_path: Path) -> None:
     write(
         root,
         "decisions/ADR-20261001-self.md",
-        note_text("ADR-20261001-self", "decision", supersedes="ADR-20261001-self"),
+        note_text(
+            "ADR-20261001-self", "decision", status="accepted", supersedes="ADR-20261001-self"
+        ),
     )
     changes, conflicts = plan(Vault.load(root))
     assert changes == []
@@ -190,7 +207,7 @@ def test_conflict_grammar_for_types_starting_with_a_vowel(tmp_path: Path) -> Non
     write(
         root,
         "decisions/ADR-20261002-b.md",
-        note_text("ADR-20261002-b", "decision", supersedes="IDEA-20261001-x"),
+        note_text("ADR-20261002-b", "decision", status="accepted", supersedes="IDEA-20261001-x"),
     )
     _, conflicts = plan(Vault.load(root))
     assert conflicts[0].message == "IDEA-20261001-x is an idea and cannot be superseded"
@@ -219,7 +236,12 @@ def test_apply_reports_a_failed_write_and_continues(
         write(
             root,
             f"decisions/ADR-20261002-{new}.md",
-            note_text(f"ADR-20261002-{new}", "decision", supersedes=f"ADR-20261001-{old}"),
+            note_text(
+                f"ADR-20261002-{new}",
+                "decision",
+                status="accepted",
+                supersedes=f"ADR-20261001-{old}",
+            ),
         )
     vault = Vault.load(root)
     written, failed = apply(vault, plan(vault)[0], TODAY)
@@ -231,3 +253,138 @@ def test_apply_reports_a_failed_write_and_continues(
             "could not write: ADR-20261001-a.md: frontmatter cannot be updated (line 3)",
         )
     ]
+
+
+def test_a_note_that_is_not_utf8_is_reported_without_its_bytes(tmp_path: Path) -> None:
+    from labbrain.vault import load_config
+
+    root = make_vault(tmp_path / "v")
+    path = write(root, "decisions/x.md", "---\nid: x\nstatus: accepted\n---\ncaf")
+    path.write_bytes(path.read_bytes() + b"\xe9\n")
+    vault = Vault.load(root, load_config(root))
+    change = Change("x", "decisions/x.md", {"status": "superseded"}, "superseded by y")
+    written, failed = apply(vault, [change], date(2026, 10, 15))
+    assert written == []
+    assert [f.message for f in failed] == ["could not write: file is not valid UTF-8"]
+
+
+@pytest.mark.parametrize(
+    ("note_type", "folder", "prefix", "pending", "in_force", "old_status"),
+    [
+        ("decision", "decisions", "ADR", "proposed", "accepted", "accepted"),
+        ("experiment", "experiments", "EXP", "planned", "done", "done"),
+        ("experiment", "experiments", "EXP", "running", "done", "done"),
+        ("experiment", "experiments", "EXP", "failed", "done", "done"),
+    ],
+)
+def test_a_successor_supersedes_only_once_in_force(
+    tmp_path: Path,
+    note_type: str,
+    folder: str,
+    prefix: str,
+    pending: str,
+    in_force: str,
+    old_status: str,
+) -> None:
+    root = make_vault(tmp_path)
+    old_id, new_id = f"{prefix}-20261001-old", f"{prefix}-20261002-new"
+    extra = {"dataset": "DS-20261001-d"} if note_type == "experiment" else {}
+    write(root, f"{folder}/{old_id}.md", note_text(old_id, note_type, status=old_status, **extra))
+    new_path = write(
+        root,
+        f"{folder}/{new_id}.md",
+        note_text(new_id, note_type, status=pending, supersedes=old_id, **extra),
+    )
+    assert plan(Vault.load(root)) == ([], [])
+    new_path.write_text(note_text(new_id, note_type, status=in_force, supersedes=old_id, **extra))
+    changes, conflicts = plan(Vault.load(root))
+    assert conflicts == []
+    assert [(c.note_id, c.updates) for c in changes] == [
+        (old_id, {"status": "superseded", "superseded_by": new_id})
+    ]
+
+
+def _sync_twice(root: Path) -> list[tuple[str, dict]]:
+    """Plan and apply sync twice; returns the second run's planned changes."""
+    for _ in range(2):
+        vault = Vault.load(root)
+        changes, _ = plan(vault)
+        apply(vault, changes, TODAY)
+    return [(c.note_id, c.updates) for c in plan(Vault.load(root))[0]]
+
+
+def _status(root: Path, rel: str) -> tuple[str | None, str | None]:
+    from labbrain.notes import parse_note
+
+    note = parse_note(root / rel, root)
+    return note.get_str("status"), note.get_str("superseded_by")
+
+
+def test_an_existing_supersession_is_kept(tmp_path: Path) -> None:
+    """A successor superseded since keeps the supersession it already made."""
+    root = make_vault(tmp_path)
+    old = write(
+        root,
+        "decisions/ADR-20261001-a.md",
+        note_text("ADR-20261001-a", "decision", status="accepted", superseded_by="ADR-20261002-b"),
+    )
+    write(
+        root,
+        "decisions/ADR-20261002-b.md",
+        note_text(
+            "ADR-20261002-b",
+            "decision",
+            status="superseded",
+            supersedes="ADR-20261001-a",
+            superseded_by="ADR-20261003-c",
+        ),
+    )
+    changes, conflicts = plan(Vault.load(root))
+    assert conflicts == []
+    assert [(c.note_id, c.updates) for c in changes] == [
+        ("ADR-20261001-a", {"status": "superseded"})
+    ]
+    assert _sync_twice(root) == []
+    assert _status(root, "decisions/ADR-20261001-a.md") == ("superseded", "ADR-20261002-b")
+    old.write_text(note_text("ADR-20261001-a", "decision", status="accepted"))
+    assert plan(Vault.load(root)) == ([], [])  # a superseded successor makes no new supersession
+
+
+def test_no_supersession_through_a_successor_that_never_ran(tmp_path: Path) -> None:
+    root = make_vault(tmp_path)
+    ds = {"dataset": "DS-20261001-d"}
+    write(
+        root,
+        "experiments/EXP-20261001-y.md",
+        note_text("EXP-20261001-y", "experiment", status="done", **ds),
+    )
+    write(
+        root,
+        "experiments/EXP-20261002-p.md",
+        note_text("EXP-20261002-p", "experiment", status="planned", supersedes="EXP-20261001-y"),
+    )
+    write(
+        root,
+        "experiments/EXP-20261003-q.md",
+        note_text("EXP-20261003-q", "experiment", status="done", supersedes="EXP-20261002-p", **ds),
+    )
+    assert _sync_twice(root) == []
+    assert _status(root, "experiments/EXP-20261002-p.md") == ("superseded", "EXP-20261003-q")
+    assert _status(root, "experiments/EXP-20261001-y.md") == ("done", None)
+
+
+def test_mutual_supersession_leaves_a_decision_in_force(tmp_path: Path) -> None:
+    root = make_vault(tmp_path)
+    write(
+        root,
+        "decisions/ADR-20261001-a.md",
+        note_text("ADR-20261001-a", "decision", status="accepted", supersedes="ADR-20261002-b"),
+    )
+    write(
+        root,
+        "decisions/ADR-20261002-b.md",
+        note_text("ADR-20261002-b", "decision", status="proposed", supersedes="ADR-20261001-a"),
+    )
+    assert _sync_twice(root) == []
+    assert _status(root, "decisions/ADR-20261001-a.md") == ("accepted", None)
+    assert _status(root, "decisions/ADR-20261002-b.md") == ("superseded", "ADR-20261001-a")

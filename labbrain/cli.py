@@ -162,6 +162,8 @@ def cmd_new(args: argparse.Namespace) -> int:
         raise UsageError("--title is required")
     author = _author(args)
     root, config = _config(args)
+    if args.summary and not config.is_agent(author):
+        print("labbrain: note: --summary is ignored for human authors", file=sys.stderr)
     try:
         path = create(
             root,
@@ -175,10 +177,16 @@ def cmd_new(args: argparse.Namespace) -> int:
             first_author=args.first_author,
             year=args.year,
             name=args.name,
+            summary=args.summary,
+            body=args.body,
+            tags=args.tag,
+            status=args.status,
         )
     except IdError as exc:
         raise UsageError(str(exc)) from exc
     print(path)
+    if args.finish is not None:
+        return _finish(args, [path], args.finish, author)
     return EXIT_OK
 
 
@@ -193,8 +201,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
-    from labbrain.findings import ERROR, INFO, Finding, sort_findings
-    from labbrain.sync import apply, plan
+    from labbrain.sync import apply, plan, report
     from labbrain.vault import today
 
     vault = _vault(args)
@@ -203,14 +210,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
     if not args.dry_run:
         _, failed = apply(vault, changes, today())
     verb = "would update" if args.dry_run else "updated"
-    findings = [Finding(c.rel, 1, "sync", ERROR, c.message) for c in conflicts + failed]
-    failed_rels = {c.rel for c in failed}
-    for change in changes:
-        if change.rel in failed_rels:
-            continue
-        fields = ", ".join(f"{key} → {value}" for key, value in change.updates.items())
-        findings.append(Finding(change.rel, 1, "sync", INFO, f"{verb}: {fields} ({change.reason})"))
-    return _emit(sort_findings(findings), args.format)
+    return _emit(report(changes, conflicts, failed, verb=verb), args.format)
 
 
 def cmd_index(args: argparse.Namespace) -> int:
@@ -339,7 +339,12 @@ def cmd_config_hash(args: argparse.Namespace) -> int:
         data = load_run_config(args.file)
     except ValueError as exc:
         raise UsageError(str(exc)) from exc
-    print(config_hash(data, ignore))
+    try:
+        digest = config_hash(data, ignore)
+    except ValueError:
+        name = args.file.name
+        raise UsageError(f"run config {name} has keys that collide when flattened") from None
+    print(digest)
     return EXIT_OK
 
 
@@ -347,6 +352,108 @@ def cmd_schema(args: argparse.Namespace) -> int:
     from labbrain.schema import json_schema
 
     print(json.dumps(json_schema(args.type), indent=2))
+    return EXIT_OK
+
+
+def _finish(args: argparse.Namespace, paths: list[Path], text: str, author: str | None) -> int:
+    from labbrain.finish import finish
+    from labbrain.vault import now
+
+    result = finish(paths, log_text=text, author=author, when=now(), vault=args.vault)
+    code = _emit(result.findings, "text")
+    if result.index_updated is not None:
+        print("index.md updated" if result.index_updated else "index.md already up to date")
+    return code
+
+
+def cmd_finish(args: argparse.Namespace) -> int:
+    return _finish(args, args.paths, args.log, args.author or os.environ.get("LABBRAIN_AUTHOR"))
+
+
+def cmd_brief(args: argparse.Namespace) -> int:
+    from labbrain import lint
+    from labbrain.brief import build_brief
+    from labbrain.vault import Vault, load_config, version_warning
+
+    root = _root(args)
+    config = load_config(root)  # no stderr warning: the brief prints it once itself
+    vault = Vault.load(root, config)
+    text = build_brief(vault, lint.run(vault), short=args.short, warning=version_warning(config))
+    print(text, end="")
+    return EXIT_OK
+
+
+def cmd_tracker_fetch(args: argparse.Namespace) -> int:
+    from labbrain.confighash import string_keys
+    from labbrain.trackers import check_run_ids, describe, get_adapter
+
+    check_run_ids(args.runs)
+    root, config = _config(args)
+    records = get_adapter(config, root).fetch(args.runs)
+    described = string_keys([describe(r, config) for r in records])
+    print(json.dumps(described, indent=2, default=str))
+    return EXIT_OK
+
+
+def cmd_code_sha(args: argparse.Namespace) -> int:
+    from labbrain.codeinfo import code_sha
+    from labbrain.vault import resolve_config_path
+
+    root, config = _config(args)
+    if args.repo:
+        label, path = args.repo, Path(args.repo).expanduser()
+    elif config.code_repo.strip():
+        label, path = config.code_repo, resolve_config_path(root, config.code_repo)
+    else:
+        raise UsageError("code repo not set")
+    info = code_sha(path, exclude=root)
+    print(json.dumps({"repo": label, "sha": info.sha, "dirty": info.dirty}))
+    return EXIT_OK
+
+
+def cmd_tracker_diff(args: argparse.Namespace) -> int:
+    from labbrain.experiments import config_diff, parent_run_ids, render_setup
+    from labbrain.trackers import check_run_ids, get_adapter
+    from labbrain.vault import Vault
+
+    check_run_ids(args.runs)
+    root, config = _config(args)
+    vault = Vault.load(root, config)
+    adapter = get_adapter(config, root)
+    parent = [r["config"] for r in adapter.fetch(parent_run_ids(vault, args.parent))]
+    child = [r["config"] for r in adapter.fetch(args.runs)]
+    print(render_setup(config_diff(args.parent, parent, child, config.hash_ignore)), end="")
+    return EXIT_OK
+
+
+def cmd_exp_record(args: argparse.Namespace) -> int:
+    from labbrain.experiments import RecordRequest, record
+    from labbrain.ids import IdError
+
+    if args.title is not None and not args.title.strip():
+        raise UsageError("--title is required")
+    author = _author(args)
+    root, config = _config(args)
+    request = RecordRequest(
+        run_ids=args.runs,
+        author=author,
+        now=_now(args.at),
+        title=args.title,
+        into=args.into,
+        parent=args.parent,
+        protocol=args.protocol,
+        dataset=args.dataset,
+        hypothesis=args.hypothesis,
+        summary=args.summary,
+        links=args.link,
+    )
+    try:
+        path = record(root, config, request)
+    except IdError as exc:
+        raise UsageError(str(exc)) from exc
+    print(path)
+    if args.finish is not None:
+        return _finish(args, [path], args.finish, author)
     return EXIT_OK
 
 
@@ -400,6 +507,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("new", "create a skeleton note and print its path")
     _add_id_options(p)
     p.add_argument("--link", action="append", default=[], help="ID to put in `links` (repeatable)")
+    p.add_argument("--summary", default="", help="one line for the For-future-agents block")
+    p.add_argument("--body", default="", help="text placed before the required sections")
+    p.add_argument("--tag", action="append", default=[], help="tag (repeatable)")
+    p.add_argument("--status", default=None, help="initial status (default: the type's default)")
+    p.add_argument("--finish", default=None, help="then run `finish` with this log text")
     p.set_defaults(func=cmd_new)
 
     p = add("validate", "check single files (used by the write hook)")
@@ -458,16 +570,65 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("schema", "print the JSON Schema of the frontmatter models")
     p.add_argument("type", nargs="?", choices=NOTE_TYPES)
     p.set_defaults(func=cmd_schema)
+
+    p = add("finish", "validate written notes, then sync, regenerate the index and log")
+    p.add_argument("paths", nargs="+", type=Path)
+    p.add_argument("--log", required=True, help="text for today's log")
+    p.add_argument("--author")
+    p.set_defaults(func=cmd_finish)
+
+    p = add("brief", "print where the project stands")
+    p.add_argument("--short", action="store_true", help="at most four lines (SessionStart hook)")
+    p.set_defaults(func=cmd_brief)
+
+    tracker = add("tracker", "tracker commands")
+    tracker_sub = tracker.add_subparsers(dest="tracker_command", required=True)
+    p = tracker_sub.add_parser("fetch", help="print runs as JSON", parents=[common])
+    p.add_argument("runs", nargs="+", metavar="RUN")
+    p.set_defaults(func=cmd_tracker_fetch)
+    p = tracker_sub.add_parser(
+        "diff", help="config diff against a parent experiment", parents=[common]
+    )
+    p.add_argument("runs", nargs="+", metavar="RUN")
+    p.add_argument("--parent", required=True, help="experiment ID whose runs are the baseline")
+    p.set_defaults(func=cmd_tracker_diff)
+
+    code = add("code", "code repository commands")
+    code_sub = code.add_subparsers(dest="code_command", required=True)
+    p = code_sub.add_parser(
+        "sha", help="print the code repo's commit and dirty flag", parents=[common]
+    )
+    p.add_argument("--repo", help="code repository (default: code_repo from config)")
+    p.set_defaults(func=cmd_code_sha)
+
+    exp = add("exp", "experiment commands")
+    exp_sub = exp.add_subparsers(dest="exp_command", required=True)
+    p = exp_sub.add_parser("record", help="write an experiment note from runs", parents=[common])
+    p.add_argument("runs", nargs="+", metavar="RUN")
+    p.add_argument("--author", default=None)
+    target = p.add_mutually_exclusive_group(required=True)
+    target.add_argument("--title", help="create a new experiment with this title")
+    target.add_argument("--into", help="fill in this planned or running experiment")
+    p.add_argument("--parent", help="experiment whose runs these change (config diff)")
+    p.add_argument("--protocol", help="protocol ID (default: the runs' protocol key)")
+    p.add_argument("--dataset", help="dataset ID (default: the runs' dataset key)")
+    p.add_argument("--hypothesis")
+    p.add_argument("--summary", default="", help="one line for the For-future-agents block")
+    p.add_argument("--link", action="append", default=[], help="ID to put in `links` (repeatable)")
+    p.add_argument("--at", default=None, help="ISO datetime to use instead of now")
+    p.add_argument("--finish", default=None, help="then run `finish` with this log text")
+    p.set_defaults(func=cmd_exp_record)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    from labbrain.errors import EngineError
     from labbrain.vault import ConfigError, VaultNotFound
 
     try:
         code = int(args.func(args))
-    except (VaultNotFound, ConfigError, UsageError) as exc:
+    except (VaultNotFound, ConfigError, UsageError, EngineError) as exc:
         print(f"labbrain: {exc}", file=sys.stderr)
         return EXIT_USAGE
     except BrokenPipeError:

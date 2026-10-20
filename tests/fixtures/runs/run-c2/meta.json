@@ -1,0 +1,1 @@
+{"name": "lr-dropout-fold1", "status": "finished", "started_at": "2026-10-12T09:05:00", "tags": ["lr-sweep"], "git_sha": "5d6e7f8", "git_dirty": false, "notes": "Hypothesis: a lower learning rate with dropout beats label smoothing alone on test AUROC."}

@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
-from labbrain.findings import display_id
-from labbrain.notes import update_frontmatter
+from labbrain.findings import ERROR, INFO, Finding, display_id, sort_findings
+from labbrain.notes import Note, update_frontmatter
 from labbrain.schema import MODELS
 from labbrain.vault import Vault
 
@@ -27,6 +27,33 @@ def _supersedable(note_type: str | None) -> bool:
 
 def _with_article(word: str) -> str:
     return f"{'an' if word[:1] in 'aeiou' else 'a'} {word}"
+
+
+# The status in which a decision or an experiment is in force: one that sets
+# `supersedes` supersedes nothing until it is accepted (decision) or done (experiment)
+# and sync runs again. Other types are in force in every status.
+IN_FORCE: dict[str, str] = {"decision": "accepted", "experiment": "done"}
+
+
+def _in_force(note: Note, target: Note | None) -> bool:
+    """Whether `note`'s `supersedes` takes effect on `target`.
+
+    A successor superseded since counts only for a supersession already recorded (the
+    target's superseded_by names it), so sync keeps what it did but never supersedes
+    anew through a note that was never in force: no cascade through a planned
+    experiment, no loop between two decisions, and a second sync changes nothing.
+    """
+    required = IN_FORCE.get(note.type or "")
+    if required is None:
+        return True
+    status = note.get_str("status")
+    if status == required:
+        return True
+    return (
+        status == "superseded"
+        and target is not None
+        and target.get_str("superseded_by") == note.stem
+    )
 
 
 @dataclass(frozen=True)
@@ -51,7 +78,7 @@ def plan(vault: Vault) -> tuple[list[Change], list[Conflict]]:
     successors: dict[str, list[str]] = defaultdict(list)
     for note in vault.notes.values():
         target = note.get_str("supersedes")
-        if target:
+        if target and _in_force(note, vault.get(target)):
             successors[target].append(note.stem)
     for old_id in sorted(successors):
         old = vault.get(old_id)
@@ -123,6 +150,10 @@ def apply(vault: Vault, changes: list[Change], today: date) -> tuple[list[str], 
             changed = update_frontmatter(
                 vault.root / change.rel, {**change.updates, "updated": today}
             )
+        except UnicodeDecodeError:  # its message quotes a byte of the file
+            message = "could not write: file is not valid UTF-8"
+            failed.append(Conflict(change.note_id, change.rel, message))
+            continue
         except ValueError as exc:  # names only the file and a line
             failed.append(Conflict(change.note_id, change.rel, f"could not write: {exc}"))
             continue
@@ -133,3 +164,17 @@ def apply(vault: Vault, changes: list[Change], today: date) -> tuple[list[str], 
         if changed:
             written.append(change.rel)
     return written, failed
+
+
+def report(
+    changes: list[Change], conflicts: list[Conflict], failed: list[Conflict], *, verb: str
+) -> list[Finding]:
+    """Sync results as findings: conflicts and failed writes are errors, changes are info."""
+    findings = [Finding(c.rel, 1, "sync", ERROR, c.message) for c in conflicts + failed]
+    failed_rels = {c.rel for c in failed}
+    for change in changes:
+        if change.rel in failed_rels:
+            continue
+        fields = ", ".join(f"{key} → {value}" for key, value in change.updates.items())
+        findings.append(Finding(change.rel, 1, "sync", INFO, f"{verb}: {fields} ({change.reason})"))
+    return sort_findings(findings)

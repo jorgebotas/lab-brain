@@ -1,0 +1,1 @@
+{"test": {"auroc": 0.85}, "val": {"auroc": 0.86}, "epoch": 20}

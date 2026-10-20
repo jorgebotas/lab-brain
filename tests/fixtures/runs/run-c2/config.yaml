@@ -1,0 +1,14 @@
+model:
+  name: convnet
+  depth: 4
+  dropout: 0.1
+optim:
+  lr: 0.0003
+loss:
+  label_smoothing: 0.1
+data:
+  dataset: DS-20260801-main-split
+  fold: 1
+eval:
+  protocol: EVAL-v2
+seed: 4

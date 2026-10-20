@@ -12,9 +12,7 @@ from __future__ import annotations
 import os
 import pwd
 import re
-import unicodedata
 from collections.abc import Iterable, Mapping
-from fnmatch import fnmatchcase, translate
 from pathlib import Path
 from typing import Any
 
@@ -43,11 +41,10 @@ FILE_TOOLS = frozenset({"Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "N
 WRITE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
 PATH_KEYS = ("file_path", "notebook_path", "path")
 
-# A Glob component with any of these is a wildcard. `(` is added to the spec's `*?[{` so an
-# extglob such as `@(name)` is not taken as a literal directory name.
-GLOB_SPECIAL = frozenset("*?[{(")
-# Remaining Glob syntax that fnmatch does not model: treated as able to reach anything below.
-GLOB_UNMODELLED = ("**", "{", "(", "\\")
+# A Glob component with any of these is a wildcard (R20): the literal directories before it
+# are where the search may start. A component starting with `!`, or any `\\`, denies.
+GLOB_SPECIAL = frozenset("*?[]{}!\\")
+MAX_GLOB_NAMES = 64  # more literal leading directories than this in a Glob pattern: deny
 
 MAX_DEPTH = 20  # containers nested deeper than this in tool_input are not walked: deny
 MAX_STRINGS = 2000  # more strings than this in tool_input: deny
@@ -185,93 +182,49 @@ def _grep(args: dict[str, Any], cwd: Path, scope: Scope, subject: str) -> Denial
 
 
 def _glob(args: dict[str, Any], cwd: Path, scope: Scope, subject: str) -> Denial | None:
-    """Glob is ripgrep (`rg --files --glob <pattern>` from `path`), with gitignore matching:
-    a pattern with no `/` but a trailing one matches at any depth, and a leading `/` anchors
-    it at the search root. Every reading the pattern may have is checked."""
+    """Glob is a recursive construct (R20), like rule 6a for Bash.
+
+    Claude Code rewrites a pattern before ripgrep runs it, so the pattern is not matched. It
+    is denied when any directory it may search from holds a protected root or lies inside
+    one, or when ripgrep could read it as an exclusion (`!`) or an escape (`\\`).
+    """
     pattern = args.get("pattern")
     if not isinstance(pattern, str):
         raise _Unsure
-    base = _start(args, cwd)
-    expanded = _expand_home(_negations(pattern), scope.env)
-    if os.sep not in expanded.rstrip(os.sep):
-        readings = [base / "**" / expanded]  # matches at any depth below the search root
-    elif expanded.startswith(os.sep):
-        readings = [Path(expanded), base / expanded.lstrip(os.sep)]  # absolute, or anchored
-    else:
-        readings = [base / expanded]
-    for reading in readings:
-        root = _glob_reading(reading.parts, cwd, scope)
-        if root is not None:
-            return data_denial(root, subject)
+    for base in _glob_bases(pattern, _start(args, cwd), scope.env):
+        start = _canon(str(base), cwd)
+        root = scope.targets.containing(start)
+        below = scope.targets.under(start)
+        if root is not None or below:
+            return data_denial(root or below[0], subject)
     return None
 
 
-def _negations(pattern: str) -> str:
-    """`pattern` with each class opened by `[^` rewritten to `[!` (R18): globset negates with
-    either, while fnmatch reads `[^x]` as the class of `^` and `x`."""
-    out: list[str] = []
-    i = 0
-    while i < len(pattern):
-        j = i + 1
-        if pattern[i] == "[":
-            j += pattern[j : j + 1] in ("!", "^")
-            j += pattern[j : j + 1] == "]"  # a `]` first in a class is literal
-            end = pattern.find("]", j)
-            if end != -1:
-                body = pattern[i + 1 : end]
-                out.append("[" + ("!" + body[1:] if body.startswith("^") else body) + "]")
-                i = end + 1
-                continue
-            j = i + 1
-        out.append(pattern[i:j])
-        i = j
-    return "".join(out)
+def _glob_bases(pattern: str, start: Path, env: Mapping[str, str]) -> list[Path]:
+    """Every directory a Glob of `pattern` from `start` may search from.
 
-
-def _glob_reading(parts: tuple[str, ...], cwd: Path, scope: Scope) -> ProtectedRoot | None:
-    """The root the absolute glob `parts` could match inside, or None."""
-    cut = next((i for i, part in enumerate(parts) if GLOB_SPECIAL & set(part)), len(parts))
-    prefix = _canon(str(Path(*parts[:cut])), cwd)
-    rest = parts[cut:]
-    if ".." in rest:  # a wildcard followed by `..` can climb anywhere
-        raise _Unsure
-    root = scope.targets.containing(prefix)
-    if root is not None:
-        return root
-    for root in scope.targets.under(prefix):
-        if _may_reach(rest, prefix, root):
-            return root
-    return None
-
-
-def _may_reach(rest: tuple[str, ...], prefix: Path, root: ProtectedRoot) -> bool:
-    """Whether the wildcard components `rest` below `prefix` could match inside `root`."""
-    text = "/".join(rest)
-    if any(token in text for token in GLOB_UNMODELLED):
-        return True
-    # `under` matched folded spellings, and folding keeps separators, so the root's first
-    # components are the prefix's.
-    names = root.path.parts[len(prefix.parts) :]
-    if len(rest) < len(names):
-        return False  # every match lies above the root
-    return all(_component_matches(name, part) for name, part in zip(names, rest, strict=False))
-
-
-def _component_matches(name: str, part: str) -> bool:
-    """Whether Glob component `part` could match directory name `name`, over-approximated.
-
-    Raw, folded, and case-insensitively in NFC and NFD: folding can change a name's length
-    (ß -> ss), which breaks `?` and `[]`, and a name may be stored NFD on disk.
+    `start` itself; each run of the pattern's literal leading directories joined to it (the
+    pattern read relative, `/`-anchored, or with leading components that repeat the end of
+    `start` stripped); and for an absolute or `~` pattern, its literal prefix and every
+    parent of it, `/` included.
     """
-    if fnmatchcase(name, part) or fnmatchcase(fold(name), fold(part)):
-        return True
-    forms = ("NFC", "NFD")
-    names = {unicodedata.normalize(form, name) for form in forms}
-    for pattern in {part, *(unicodedata.normalize(form, part) for form in forms)}:
-        regex = re.compile(translate(pattern), re.IGNORECASE)
-        if any(regex.fullmatch(n) for n in names):
-            return True
-    return False
+    parts = pattern.split(os.sep)
+    if "\\" in pattern or any(part.startswith("!") for part in parts):
+        raise _Unsure
+    cut = next((i for i, part in enumerate(parts) if GLOB_SPECIAL & set(part)), len(parts))
+    if ".." in parts[cut:]:  # a wildcard followed by `..` can climb anywhere
+        raise _Unsure
+    names = [part for part in parts[:cut] if part not in ("", ".")]
+    if len(names) > MAX_GLOB_NAMES:
+        raise _Unsure
+    bases = [start]
+    bases += [
+        start.joinpath(*names[i:j]) for i in range(len(names)) for j in range(i + 1, len(names) + 1)
+    ]
+    if pattern.startswith((os.sep, "~")) and cut > 0:
+        prefix = Path(_expand_home(os.sep.join(parts[:cut]) or os.sep, env))
+        bases += [prefix, *prefix.parents]
+    return bases
 
 
 def _expand_home(text: str, env: Mapping[str, str]) -> str:

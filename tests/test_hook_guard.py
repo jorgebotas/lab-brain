@@ -226,24 +226,58 @@ def test_glob_star_star_from_ancestor_denied(world: World) -> None:
     denied(world, "Glob", {"pattern": "p?i/*", "path": str(world.tmp)})
     denied(world, "Glob", {"pattern": "[op]hi", "path": str(world.tmp)})  # the root itself
     denied(world, "Glob", {"pattern": "../**", "path": str(world.vault)})
-    # Patterns fnmatch cannot model are treated as recursive.
     denied(world, "Glob", {"pattern": "{phi,x}/*.csv", "path": str(world.tmp)})
     denied(world, "Glob", {"pattern": "@(phi)/rows.csv", "path": str(world.tmp)})
     denied(world, "Glob", {"pattern": "*/../phi/rows.csv", "path": str(world.vault)})
 
 
 def test_glob_shallow_from_ancestor_allowed(world: World) -> None:
-    allowed(world, "Glob", {"pattern": "vault/*.md", "path": str(world.tmp)})
-    allowed(world, "Glob", {"pattern": "/vault/*.md", "path": str(world.tmp)})  # anchored
-    allowed(world, "Glob", {"pattern": "vault/**/*.md", "path": str(world.tmp)})
-    allowed(world, "Glob", {"pattern": "x*/*.csv", "path": str(world.tmp)})
-    allowed(world, "Glob", {"pattern": "**/*.md"})
+    """R20: a Glob is allowed when no search base holds a root or lies inside one."""
+    lab = world.tmp / "lab"  # the vault's parent here holds no data path
+    vault = make_vault(lab / "vault", protected_config(world.phi))
+    write(vault, "notes/n.md", "A note.\n")
+    for pattern in ("vault/*.md", "vault/**/*.md", "x*/*.csv", "*.md", "**/*.csv"):
+        allowed(world, "Glob", {"pattern": pattern, "path": str(lab)}, cwd=vault)
+    allowed(world, "Glob", {"pattern": "*.md"})  # from a sibling of the root
+    allowed(world, "Glob", {"pattern": "**/*.md", "path": str(world.vault / "notes")})
+    # The same patterns from an ancestor of the root are recursive: denied.
+    for pattern in ("vault/*.md", "/vault/*.md", "x*/*.csv", "*.md"):
+        denied(world, "Glob", {"pattern": pattern, "path": str(world.tmp)})
 
 
 def test_glob_absolute_into_root_denied(world: World) -> None:
     denied(world, "Glob", {"pattern": f"{world.phi}/*.csv"})
     denied(world, "Glob", {"pattern": "*.csv", "path": str(world.phi)})
     denied(world, "Glob", {"pattern": f"{world.rows}"})
+    # Claude Code cuts an absolute pattern at its first wildcard and searches from the part
+    # before it, at any depth: these reach the root from its parent.
+    for pattern in ("*.csv", "rows.csv", "d*"):
+        denied(world, "Glob", {"pattern": f"{world.tmp}/{pattern}"})
+    # Every directory prefix of an absolute pattern is a base, `/` included.
+    denied(world, "Glob", {"pattern": f"{world.vault}/notes/*.md"})
+    denied(world, "Glob", {"pattern": "/notes/*.md", "path": str(world.vault)})
+
+
+def test_glob_recursive_bases(world: World) -> None:
+    """R20: Glob is a recursive construct. Every base its pattern may search from is checked."""
+    tmp = world.tmp
+    # qKo: leading components that repeat the end of `path` are stripped by Claude Code.
+    for pattern in (f"{tmp.name}/phi/*", f"{tmp.name}/phi/rows.csv"):
+        denied(world, "Glob", {"pattern": pattern, "path": str(tmp)})
+    # A literal leading directory that is a link into the root, at any offset.
+    (world.vault / "lnk").symlink_to(world.phi, target_is_directory=True)
+    denied(world, "Glob", {"pattern": "lnk/*.csv"})
+    denied(world, "Glob", {"pattern": "notes/../lnk/*"})
+    denied(world, "Glob", {"pattern": f"{world.vault.name}/lnk/*"})  # stripped, then the link
+    denied(world, "Glob", {"pattern": "/lnk/*"})  # anchored at path
+    # ripgrep reads a leading `!` as an exclusion, listing everything else; `\` escapes.
+    for path in (tmp, world.vault):
+        for pattern in ("!nothing/here", "!/x", "!*.md", "notes/!x/*", "notes\\*.md", "\\!x"):
+            denied(world, "Glob", {"pattern": pattern, "path": str(path)})
+    allowed(world, "Glob", {"pattern": "notes/x!/*.md"})  # `!` not leading a component
+    deep = "/".join(["d"] * guard.MAX_GLOB_NAMES)
+    allowed(world, "Glob", {"pattern": f"{deep}/*.md"})
+    denied(world, "Glob", {"pattern": f"{deep}/d/*.md"})  # too many literal directories: unsure
 
 
 # --- Bash routing -------------------------------------------------------------------------
@@ -443,8 +477,9 @@ def test_home_relative_root(world: World, monkeypatch: pytest.MonkeyPatch) -> No
         denied(world, "mcp__x__y", {"q": text}, entry=entry)
     denied(world, "Glob", {"pattern": "~/deep/*/x.csv"}, entry=entry)
     denied(world, "Glob", {"pattern": "*/*", "path": str(world.home)}, entry=entry)
-    allowed(world, "Glob", {"pattern": "*/*.csv", "path": str(world.home)})  # beside the root
-    allowed(world, "Glob", {"pattern": "/d*", "path": str(world.home)})  # above the root
+    denied(world, "Glob", {"pattern": "*/*.csv", "path": str(world.home)}, entry=entry)
+    denied(world, "Glob", {"pattern": "/d*", "path": str(world.home)}, entry=entry)  # from `/`
+    allowed(world, "Glob", {"pattern": "*/*.csv", "path": str(world.home / "other")})
     denied(world, "Glob", {"pattern": f"~nosuchuser{secrets.token_hex(4)}/*"}, entry=entry)
     for tool, args in (
         ("Glob", {"path": str(world.home)}),
@@ -484,21 +519,21 @@ def test_glob_non_ascii_root(world: World) -> None:
         "STRA[ß]E/*",
     ):
         denied(world, "Glob", {"pattern": pattern, "path": str(world.tmp)}, entry=entry)
-    allowed(world, "Glob", {"pattern": "stra?x/*", "path": str(world.tmp)})
+    denied(world, "Glob", {"pattern": f"{straße}/*"}, entry=entry)
+    denied(world, "Glob", {"pattern": "*", "path": str(straße).upper()}, entry=entry)
+    allowed(world, "Glob", {"pattern": "stra?e/*", "path": str(world.vault)})
 
 
 def test_glob_caret_negation(world: World) -> None:
-    """R18: `[^x]` negates, as in ripgrep's globset, not a class of `^` and `x` as in fnmatch."""
-    for pattern in ("p[^x]i/*", "P[^x]I/*"):
+    """R18: `[^x]` negates in ripgrep's globset; from an ancestor of the root any class denies."""
+    for pattern in ("p[^x]i/*", "P[^x]I/*", "p[^h]i/*"):
         denied(world, "Glob", {"pattern": pattern, "path": str(world.tmp)})
-    allowed(world, "Glob", {"pattern": "p[^h]i/*", "path": str(world.tmp)})  # excludes the h
     straße = world.tmp / "straße"
     straße.mkdir()
     (world.vault / ".labbrain" / "config.yaml").write_text(protected_config(straße))
     denied(
         world, "Glob", {"pattern": "stra[^x]e/*", "path": str(world.tmp)}, entry=(1, str(straße))
     )
-    assert guard._negations("a[^x]b[!y][^]z][[^]c[^") == "a[!x]b[!y][!]z][[^]c[^"
 
 
 def test_glob_gitignore_readings(world: World) -> None:
@@ -508,7 +543,6 @@ def test_glob_gitignore_readings(world: World) -> None:
         denied(world, "Glob", {"pattern": pattern, "path": str(world.tmp)})
     denied(world, "Glob", {"pattern": "/phi/*", "path": str(world.tmp)})  # anchored at path
     allowed(world, "Glob", {"pattern": "*.csv", "path": str(world.vault)})  # nothing below
-    allowed(world, "Glob", {"pattern": "/notes/*.md", "path": str(world.vault)})
 
 
 def test_glob_root_stored_nfd(world: World) -> None:
@@ -520,7 +554,8 @@ def test_glob_root_stored_nfd(world: World) -> None:
     entry = (1, str(root))
     for pattern in ("caf??/*", "caf?/*", "cafe?/*", f"{nfd}/*", "CAF??/*"):
         denied(world, "Glob", {"pattern": pattern, "path": str(world.tmp)}, entry=entry)
-    allowed(world, "Glob", {"pattern": "caf???/*", "path": str(world.tmp)})
+    denied(world, "Glob", {"pattern": "*.csv", "path": str(world.tmp / nfd)}, entry=entry)
+    allowed(world, "Glob", {"pattern": "caf???/*", "path": str(world.vault)})
 
 
 def test_mcp_cannot_touch_guard_files(world: World) -> None:
@@ -593,4 +628,5 @@ def test_glob_home_from_hook_env(world: World, monkeypatch: pytest.MonkeyPatch) 
     entry = (1, str(home_phi))
     denied(world, "Glob", {"pattern": "~/phi/*.csv"}, entry=entry)
     denied(world, "Glob", {"pattern": "~/*/*.csv"}, entry=entry)
-    allowed(world, "Glob", {"pattern": "~/notes/*.md"})
+    denied(world, "Glob", {"pattern": "~/notes/*.md"}, entry=entry)  # `~` is a base: recursive
+    allowed(world, "Glob", {"pattern": "*.md", "path": str(world.home / "notes")})

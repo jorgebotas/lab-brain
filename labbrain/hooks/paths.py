@@ -16,8 +16,9 @@ elsewhere: rewriting or removing it changes that tree.
 from __future__ import annotations
 
 import os
+import re
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,6 +44,20 @@ def canonical(p: Path | str, base: Path | None = None) -> Path:
     return _joined(p, base).resolve(strict=False)
 
 
+def readings(p: Path | str, base: Path | None = None) -> list[Path]:
+    """Ruling R22: the paths `p`, joined to `base` when relative, may name.
+
+    The physical reading (`canonical`) resolves each link before climbing a `..`, as the
+    system does; it comes first and is never dropped. The textual reading collapses `..`
+    first, as Claude Code's Node `path.resolve` and a logical `cd` do, and is then
+    canonicalised; it is only ever an extra check, returned when it differs. Errors
+    propagate as for `canonical`.
+    """
+    physical = canonical(p, base)
+    textual = canonical(os.path.normpath(_joined(p, base)))
+    return [physical] if textual == physical else [physical, textual]
+
+
 def spellings(p: Path | str, base: Path | None = None) -> tuple[Path, ...]:
     """(canonical,) or, when the final component is a symlink, (canonical, own spelling).
 
@@ -55,6 +70,36 @@ def spellings(p: Path | str, base: Path | None = None) -> tuple[Path, ...]:
         return (full,)
     own = path.parent.resolve(strict=False) / path.name
     return (full,) if own == full else (full, own)
+
+
+# Path candidates in free text, shared by Bash rule 1 and the generic tool walk: runs free
+# of PATH_DELIMITERS that hold one of PATH_CHARS. Text is split, never matched with a
+# backtracking regex (`findall` is quadratic on long undelimited text); PATHLIKE is the same
+# set of runs as one regex.
+PATH_DELIMITERS = re.compile(r"""[\s'"`()<>;|&=,]+""")
+PATH_CHARS = frozenset("/~.")
+PATHLIKE = re.compile(r"""[^\s'"`()<>;|&=,]*[/~.][^\s'"`()<>;|&=,]*""")
+# Ruling R17: a path-like run is also split here, so a prefix stuck to a path (`file:../x`,
+# `[../x]`) does not hide it.
+STICKY = re.compile(r"[:\[\]{}@!$%^*+?]+")
+
+
+def path_like(token: str) -> bool:
+    """Whether `token` (free of PATH_DELIMITERS) holds `/`, `~` or `.`."""
+    return not PATH_CHARS.isdisjoint(token)
+
+
+def path_runs(text: str) -> Iterator[str]:
+    """The path-like runs of `text`, in order: what PATHLIKE finds, in linear time."""
+    for run in PATH_DELIMITERS.split(text):
+        if path_like(run):
+            yield run
+
+
+def sticky_pieces(token: str) -> list[str]:
+    """The pieces of `token` split at STICKY that are candidates: with `/`, or starting
+    with `~` or `.` (R17)."""
+    return [piece for piece in STICKY.split(token) if "/" in piece or piece.startswith(("~", "."))]
 
 
 def fold(p: Path | str) -> str:

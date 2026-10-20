@@ -199,3 +199,28 @@ def test_root_link_spelling(tmp_path: Path) -> None:
     assert t.under(base / "v") == [root]
     assert t.under(base) == [root]
     assert t.under(base / "v" / "data") == []
+
+
+def test_readings_physical_first(tmp_path: Path) -> None:
+    """Ruling R22: the physical reading first, the textual one only when it differs."""
+    base = canonical(tmp_path)
+    (base / "deep" / "a").mkdir(parents=True)
+    (base / "lnk").symlink_to(base / "deep" / "a")
+    assert paths.readings("lnk/../x", base) == [base / "deep" / "x", base / "x"]
+    assert paths.readings(str(base / "lnk" / ".." / "x"), None) == [base / "deep" / "x", base / "x"]
+    assert paths.readings("plain/../y", base) == [base / "y"]
+    assert paths.readings("", base) == [base]
+    with pytest.raises(ValueError):
+        paths.readings("a\0b", base)
+
+
+def test_path_runs_and_sticky_pieces() -> None:
+    """The shared candidate extraction: delimiter-free runs with / ~ or ., split at R17's
+    sticky characters; the same runs as the `PATHLIKE` regex finds."""
+    text = "a '../phi/x' b=~/y c(./z) file:../w [./v] plain, x.y;q|r&s`t`"
+    assert list(paths.path_runs(text)) == paths.PATHLIKE.findall(text)
+    assert list(paths.path_runs(text)) == ["../phi/x", "~/y", "./z", "file:../w", "[./v]", "x.y"]
+    assert paths.sticky_pieces("file:../w") == ["../w"]
+    assert paths.sticky_pieces("[./v]") == ["./v"]
+    assert paths.sticky_pieces("a@b/c+~d$.e") == ["b/c", "~d", ".e"]
+    assert paths.path_like("x.y") and not paths.path_like("xy") and not paths.path_like("")

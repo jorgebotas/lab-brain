@@ -17,7 +17,9 @@ from pathlib import Path
 from typing import Any
 
 from labbrain.hooks import bash
-from labbrain.hooks.paths import ProtectedRoot, canonical, fold
+from labbrain.hooks.paths import PATHLIKE as PATHLIKE  # re-exported for callers of guard
+from labbrain.hooks.paths import ProtectedRoot, fold, path_runs, readings, sticky_pieces
+from labbrain.hooks.paths import canonical as canonical  # re-exported for callers of guard
 from labbrain.hooks.payload import Denial, Payload, data_denial
 from labbrain.hooks.scope import Scope, VaultInfo
 
@@ -52,15 +54,6 @@ MAX_DEPTH = 20  # containers nested deeper than this in tool_input are not walke
 MAX_STRINGS = 2000  # more strings than this in tool_input: deny
 MAX_STRING = 4096  # a path candidate is at most this long; the textual net sees it all
 MAX_CANDIDATES = 5000  # more distinct path candidates than this in one call: deny
-
-# Path-like substrings (Bash rule 1): runs containing `/`, `~` or `.`. Task 6 unifies this with
-# bash.py. `findall` on it is quadratic on long runs without a delimiter, so the walk splits
-# on `_DELIMITERS` and `fullmatch`es each token instead, which yields the same substrings.
-PATHLIKE = re.compile(r"""[^\s'"`()<>;|&=,]*[/~.][^\s'"`()<>;|&=,]*""")
-_DELIMITERS = re.compile(r"""[\s'"`()<>;|&=,]+""")
-# A path-like token is also split here (R17), so a prefix stuck to a path (`file:../x`,
-# `[../x]`) does not hide it; pieces with `/`, or starting with `~` or `.`, are candidates.
-_STICKY = re.compile(r"[:\[\]{}@!$%^*+?]+")
 
 # A tool name goes into the message: anything outside this set is replaced, length capped.
 _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9_.:-]+")
@@ -114,28 +107,15 @@ def _reads_broken_config(payload: Payload, broken: Iterable[VaultInfo]) -> bool:
     return all(any(v.root / ".labbrain" in path.parents for v in broken) for path in paths)
 
 
-def _canon(value: object, base: Path) -> Path:
-    """Canonical `value` joined to `base`; anything that cannot be canonicalised is unsure."""
+def _readings(value: object, base: Path) -> list[Path]:
+    """`paths.readings` of `value` against `base` (R22); a value that is not a string, or
+    cannot be canonicalised, is unsure."""
     if not isinstance(value, str):
         raise _Unsure
     try:
-        return canonical(value, base)
+        return readings(value, base)
     except (ValueError, RuntimeError, OSError):
         raise _Unsure from None
-
-
-def _readings(value: object, base: Path) -> list[Path]:
-    """The paths `value`, joined to `base` when relative, may name (R22).
-
-    The physical reading resolves each link before climbing a `..`, as the system does. The
-    textual reading collapses `..` first, as Claude Code's Node `path.resolve` does, and is
-    then canonicalised. The textual reading is only ever an extra check, never a substitute.
-    """
-    physical = _canon(value, base)
-    assert isinstance(value, str)  # _canon is unsure of anything else
-    joined = os.path.join(str(base), os.path.expanduser(value))
-    textual = _canon(os.path.normpath(joined), base)
-    return [physical] if textual == physical else [physical, textual]
 
 
 def _reach(paths: Iterable[Path], scope: Scope) -> ProtectedRoot | None:
@@ -349,14 +329,9 @@ def _any_tool(args: dict[str, Any], cwd: Path, scope: Scope, subject: str) -> De
         if root is not None:
             return data_denial(root, subject)
         candidates.add(text)
-        for token in _DELIMITERS.split(text):
-            if PATHLIKE.fullmatch(token):
-                candidates.add(token)
-                candidates.update(
-                    piece
-                    for piece in _STICKY.split(token)
-                    if os.sep in piece or piece.startswith(("~", "."))
-                )
+        for token in path_runs(text):
+            candidates.add(token)
+            candidates.update(sticky_pieces(token))
         if len(candidates) > MAX_CANDIDATES:
             raise _Unsure
     paths = [path for text in candidates for path in _paths(text, cwd, scope.env)]

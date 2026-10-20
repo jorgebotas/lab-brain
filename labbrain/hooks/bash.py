@@ -29,7 +29,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from labbrain.hooks.exposure import links_under
-from labbrain.hooks.paths import ProtectedRoot, canonical, fold
+from labbrain.hooks.paths import (
+    STICKY,
+    ProtectedRoot,
+    canonical,
+    fold,
+    path_runs,
+    readings,
+    sticky_pieces,
+)
 from labbrain.hooks.payload import Denial, data_denial
 from labbrain.hooks.scope import ENV_PLUGIN_ROOT, Scope
 
@@ -329,15 +337,10 @@ LITERAL_GH_SUBCOMMANDS: frozenset[str] = frozenset(
     | {"browse"}  # not repo or gist: `gh repo clone … -- <git flags>`
 )
 LITERAL_GIT_UNSAFE: tuple[str, ...] = ("-c", "--config-env", "--exec-path")
-# Raw-text runs are split at these characters, never matched with a backtracking regex
-# (that is quadratic on long undelimited text); a run is a candidate when it holds / ~ or .
-_RAW_DELIMITERS = re.compile(r"[\s'\"`()<>;|&=,]+")
-_RAW_PATHLIKE = set("/~.")
+# Raw-text runs are `paths.path_runs`; R17's sticky split is `paths.sticky_pieces`.
 _GLOB_CHARS = set("*?[")
 _PIECE_SPLIT = re.compile(r"[=:,]")
 _GLUED_OPTION = re.compile(r"-[A-Za-z]+(?=[/~.])")
-# Ruling R17: a non-delimiter prefix stuck to a path (`file:../x`, `[../x]`) is split off.
-_STUCK_PREFIX = re.compile(r"[:\[\]{}@!$%^*+?]")
 _COMMENT_START = set(" \t\n;&|()")
 _SCAN_STOP = re.compile(r"[\\'\"$`#<\n()]")  # where the pre-pass has something to do
 _DQUOTE_STOP = re.compile(r'[\\"$`]')
@@ -1143,10 +1146,9 @@ class _Check:
             glued = _GLUED_OPTION.match(whole)
             if glued:
                 yield self._tilde(whole[glued.end() :]), False
-            if WILD not in whole and _STUCK_PREFIX.search(whole):
-                for piece in _STUCK_PREFIX.split(whole):
-                    if "/" in piece or piece.startswith(("~", ".")):
-                        yield self._tilde(piece), False
+            if WILD not in whole and STICKY.search(whole):
+                for piece in sticky_pieces(whole):
+                    yield self._tilde(piece), False
 
     def _add(self, candidate: _Candidate) -> None:
         text = candidate.text
@@ -1174,7 +1176,7 @@ class _Check:
                             self._add(_Candidate(piece, s, w, whole))
         exempt_runs = sum(len(simple.exempt) for simple in self.simples)
         for body, bindings in self.raw:
-            for run in _raw_runs(body):
+            for run in path_runs(body):
                 for alternative in self._expand(run, bindings):
                     for piece, whole in self._pieces(alternative):
                         if not piece:
@@ -1187,7 +1189,7 @@ class _Check:
     def _is_plugin_root(self, text: str) -> bool:
         if self.plugin_root is None or WILD in text or not text.startswith("/"):
             return False
-        return all(r == self.plugin_root for r in _readings(text, Path("/")))
+        return all(r == self.plugin_root for r in readings(text, Path("/")))
 
     def _exempt(self, candidate: _Candidate) -> bool:
         """The exact `--from` value after `uvx`, when it is the plugin root."""
@@ -1227,10 +1229,10 @@ class _Check:
                     if WILD in place or any(c in _GLOB_CHARS for c in place):
                         pattern = place.replace(WILD, "*")
                         for match in itertools.islice(glob.iglob(pattern), MAX_BASES + 1):
-                            for reading in _readings(match, base):
+                            for reading in readings(match, base):
                                 self._add_base(reading)
                     else:
-                        for reading in _readings(place, base):
+                        for reading in readings(place, base):
                             self._add_base(reading)
             for candidate in self.candidates:
                 if not candidate.whole or WILD in candidate.text:
@@ -1238,7 +1240,7 @@ class _Check:
                 if any(c in _GLOB_CHARS for c in candidate.text):
                     continue
                 for base in list(self.bases):
-                    for path in _readings(candidate.text, base):
+                    for path in readings(candidate.text, base):
                         if path.is_dir():
                             self._add_base(path)
 
@@ -1251,7 +1253,7 @@ class _Check:
     def resolved(self, candidate: _Candidate) -> list[Path]:
         """Both readings (ruling R22) of the candidate against every base."""
         bases = [Path("/")] if candidate.text.startswith("/") else self.bases
-        return [r for base in bases for r in _readings(candidate.text, base)]
+        return [r for base in bases for r in readings(candidate.text, base)]
 
     # -------------------------------------------------------------------- rules
 
@@ -1289,7 +1291,7 @@ class _Check:
             bases = [Path("/")] if text.startswith("/") else self.bases
             for base in bases:
                 prefix, _ = _split_pattern(self._absolute(text, base))
-                if any(self.targets.is_guard_file(r) for r in _readings(prefix, base)):
+                if any(self.targets.is_guard_file(r) for r in readings(prefix, base)):
                     return guard
         return None
 
@@ -1318,7 +1320,7 @@ class _Check:
             pattern = self._absolute(candidate.text, base).replace(WILD, "*")
             for spelling in dict.fromkeys([pattern, os.path.normpath(pattern)]):
                 for match in itertools.islice(glob.iglob(spelling), GLOB_LIMIT + 1):
-                    matches.extend(_readings(match, base))
+                    matches.extend(readings(match, base))
                     if len(matches) > GLOB_LIMIT:
                         raise _Unconfident
         return matches
@@ -1400,7 +1402,7 @@ class _Check:
             if "**" in text:  # a recursive glob, which zsh's `***` even follows
                 for base in bases:
                     prefix, _ = _split_pattern(self._absolute(text, base))
-                    self.extra_starts.extend(_readings(prefix, base))
+                    self.extra_starts.extend(readings(prefix, base))
             for match in self._glob(candidate):
                 root = self.targets.containing(match)
                 if root is not None:
@@ -1412,7 +1414,7 @@ class _Check:
         if ".." in rest:
             return Denial("data-guard", UNCONFIDENT_MESSAGE)
         rest = [part for part in rest if part not in ("", ".")]
-        for start in _readings(prefix, Path("/")):
+        for start in readings(prefix, Path("/")):
             root = self.targets.containing(start)
             if root is not None:
                 return data_denial(root, SUBJECT)
@@ -1437,7 +1439,7 @@ class _Check:
             for candidate in mine:
                 bases = [Path("/")] if candidate.text.startswith("/") else [*self.bases, *places]
                 for base in bases:
-                    for path in _readings(candidate.text, base):
+                    for path in readings(candidate.text, base):
                         root = self.targets.containing(path)
                         under = self.targets.under(path)
                         if root is not None or under:
@@ -1602,21 +1604,7 @@ class _Check:
         return None
 
 
-def _readings(p: str, base: Path) -> list[Path]:
-    """Ruling R22: `p` against `base`, resolved physically (`canonical`, links before `..`)
-    and, as an extra reading, textually (`..` collapsed first, as a logical `cd` does).
-    The physical reading always comes first and is never dropped."""
-    absolute = p if p.startswith("/") else os.path.join(base, p)
-    physical = canonical(absolute)
-    textual = canonical(os.path.normpath(absolute))
-    return [physical] if textual == physical else [physical, textual]
-
-
-def _raw_runs(text: str) -> Iterator[str]:
-    """The path-like runs of raw text: delimiter-free runs holding `/`, `~` or `.`."""
-    for run in _RAW_DELIMITERS.split(text):
-        if run and not _RAW_PATHLIKE.isdisjoint(run):
-            yield run
+_readings = readings  # ruling R22's two readings, under the name this module has used
 
 
 def _delimited(word: str, text: str, *, loose: bool = False) -> bool:

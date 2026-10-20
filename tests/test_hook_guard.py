@@ -549,6 +549,15 @@ def test_through_run_hook(world: World) -> None:
     assert run_hook("pre-tool-use", stdin, world.env) == (0, "", "")
 
 
+def test_broken_vault_bash_through_run_hook(world: World) -> None:
+    """The broken-vault seam end to end: with a broken config in scope, Bash is denied with
+    the fixed config message (rule `config`) before any Bash rule runs."""
+    (world.vault / ".labbrain" / "config.yaml").write_text("project_name: [unclosed\n")
+    for command in (f"cat {world.rows}", "labbrain lint"):
+        stdin = hook_payload("bash", cwd=world.vault, command=command)
+        assert run_hook("pre-tool-use", stdin, world.env) == (2, "", BROKEN), command
+
+
 # --- Fix round 1 --------------------------------------------------------------------------
 
 

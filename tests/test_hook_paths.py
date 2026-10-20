@@ -7,7 +7,14 @@ from pathlib import Path
 import pytest
 
 from labbrain.hooks import paths
-from labbrain.hooks.paths import GuardFile, ProtectedRoot, Targets, canonical, fold
+from labbrain.hooks.paths import (
+    GuardFile,
+    ProtectedRoot,
+    Targets,
+    canonical,
+    fold,
+    spellings,
+)
 
 
 def root_at(path: Path, vault: Path | None = None, index: int = 1) -> ProtectedRoot:
@@ -137,3 +144,50 @@ def test_guard_file_tree_and_exact(tmp_path: Path) -> None:
     assert not t.is_guard_file(exact / "child")
     assert not t.is_guard_file(tmp_path / "vault" / "notes.md")
     assert not targets().is_guard_file(exact)
+
+
+def test_spellings(tmp_path: Path) -> None:
+    base = canonical(tmp_path)
+    target = base / "target"
+    target.mkdir()
+    (base / "link").symlink_to(target)
+    (base / "dir-link").symlink_to(base)
+    assert spellings(base / "target") == (target,)
+    assert spellings(base / "link") == (target, base / "link")
+    assert spellings("link", base) == (target, base / "link")
+    # Only the final component is kept as written; links above it are resolved.
+    assert spellings(base / "dir-link" / "link") == (target, base / "link")
+    assert spellings(base / "missing" / "..") == (base,)
+    assert spellings("/") == (Path("/"),)
+
+
+def test_links_inside_roots_and_guard_trees(tmp_path: Path) -> None:
+    """A link inside a root or guarded tree is itself inside, wherever it points:
+    rewriting or removing the link changes the protected or guarded tree."""
+    base = canonical(tmp_path)
+    outside = base / "outside"
+    outside.mkdir()
+    data = base / "data"
+    data.mkdir()
+    (data / "out").symlink_to(outside)
+    tree = base / "plugins"
+    tree.mkdir()
+    (tree / "out").symlink_to(outside)
+    root = root_at(data)
+    t = targets(root, guard=(GuardFile(tree, True),))
+    assert t.containing(data / "out") == root
+    assert t.containing(outside) is None
+    assert t.is_guard_file(tree / "out")
+    assert not t.is_guard_file(outside)
+
+
+def test_root_link_spelling(tmp_path: Path) -> None:
+    base = canonical(tmp_path)
+    mount = base / "mnt" / "phi"
+    root = ProtectedRoot(base / "v", 1, "data", mount, base / "v" / "data")
+    t = targets(root)
+    assert t.containing(base / "v" / "data" / "f") == root  # even with the link gone
+    assert t.containing(base / "V" / "DATA") == root
+    assert t.under(base / "v") == [root]
+    assert t.under(base) == [root]
+    assert t.under(base / "v" / "data") == []

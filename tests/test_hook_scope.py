@@ -8,9 +8,9 @@ import sys
 from pathlib import Path
 
 import pytest
-from helpers import MIN_CONFIG, hook_payload, make_vault
+from helpers import MIN_CONFIG, hook_payload, make_vault, write
 
-from labbrain.hooks.paths import canonical
+from labbrain.hooks.paths import GuardFile, canonical
 from labbrain.hooks.scope import find_vault_roots, load_scope, vault_of
 
 PROTECTED = MIN_CONFIG + "data_paths: ['~/phi', data]\n"
@@ -187,8 +187,61 @@ def test_guard_files_listed_only_when_protected(tmp_path: Path) -> None:
     assert t.is_guard_file(tmp_path / "uvcache" / "archive-v0" / "f")
     assert not t.is_guard_file(home / ".cache" / "uv" / "f")
 
+    # Guard files reached through symlinks: the link target and the link itself are guarded.
+    real = tmp_path / "real-labbrain"
+    real.mkdir()
+    (real / "config.yaml").write_text(MIN_CONFIG + "data_paths: [data]\n")
+    linked = project / "linked"
+    linked.mkdir()
+    (linked / ".labbrain").symlink_to(real)
+    answers = write(tmp_path, "elsewhere/answers.yml", "x")
+    (linked / ".copier-answers.yml").symlink_to(answers)
+    settings = write(tmp_path, "dotfiles/settings.json", "{}")
+    (linked / ".claude").mkdir()
+    (linked / ".claude" / "settings.json").symlink_to(settings)
+    plugins = tmp_path / "plugins-store"
+    plugins.mkdir()
+    (home / ".claude").mkdir(parents=True, exist_ok=True)
+    (home / ".claude" / "plugins").symlink_to(plugins)
+    scope = load_scope(linked, env)
+    assert scope.protected
+    t = scope.targets
+    for guarded in (
+        linked / ".labbrain" / "config.yaml",
+        real / "config.yaml",
+        linked / ".labbrain",
+        linked / ".copier-answers.yml",
+        answers,
+        linked / ".claude" / "settings.json",
+        settings,
+        home / ".claude" / "plugins" / "cache" / "x",
+        plugins / "cache" / "x",
+    ):
+        assert t.is_guard_file(guarded), guarded
+    assert GuardFile(canonical(linked) / ".labbrain", True) in t.guard_files
+    assert GuardFile(canonical(real), True) in t.guard_files
+    assert GuardFile(canonical(linked) / ".copier-answers.yml", False) in t.guard_files
+    assert GuardFile(canonical(answers), False) in t.guard_files
+    assert not t.is_guard_file(answers.parent / "other.yml")
+
     # A broken vault makes the scope protected, so its guard files are listed too.
     bad = make_vault(tmp_path / "bad", "project_name: [unclosed\n")
     t = load_scope(bad, {"HOME": str(home)}).targets
     assert t.is_guard_file(bad / ".labbrain" / "config.yaml")
     assert not t.is_guard_file(plugin / "x")
+
+
+def test_symlinked_data_path_keeps_its_own_spelling(tmp_path: Path) -> None:
+    mount = tmp_path / "mnt" / "phi"
+    mount.mkdir(parents=True)
+    v = make_vault(tmp_path / "v", MIN_CONFIG + "data_paths: [data, plain]\n")
+    (v / "data").symlink_to(mount)
+    first, second = load_scope(v, {}).targets.roots
+    assert (first.path, first.link) == (canonical(mount), canonical(v) / "data")
+    assert (second.path, second.link) == (canonical(v / "plain"), None)
+    t = load_scope(v, {}).targets
+    assert t.containing(v / "data" / "f.csv") == first
+    assert t.containing(mount / "f.csv") == first
+    # A recursive walk from the vault reaches the root through the link.
+    assert t.under(v) == [first, second]
+    assert t.under(tmp_path / "mnt") == [first]

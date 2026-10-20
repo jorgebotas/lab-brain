@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from labbrain.hooks.paths import GuardFile, ProtectedRoot, Targets, canonical
+from labbrain.hooks.paths import GuardFile, ProtectedRoot, Targets, canonical, spellings
 from labbrain.layout import CONFIG_PATH
 
 if TYPE_CHECKING:
@@ -92,11 +92,12 @@ def _data_roots(root: Path, config: Config) -> list[ProtectedRoot]:
 
     if not config.protected_data:
         return []
-    return [
-        ProtectedRoot(root, index, entry, canonical(resolve_config_path(root, entry)))
-        for index, entry in enumerate(config.data_paths, start=1)
-        if entry.strip()
-    ]
+    roots: list[ProtectedRoot] = []
+    for index, entry in enumerate(config.data_paths, start=1):
+        if entry.strip():
+            path, *link = spellings(resolve_config_path(root, entry))
+            roots.append(ProtectedRoot(root, index, entry, path, link[0] if link else None))
+    return roots
 
 
 def _home(env: Mapping[str, str]) -> Path:
@@ -104,31 +105,44 @@ def _home(env: Mapping[str, str]) -> Path:
     return canonical(home) if home else Path.home().resolve()
 
 
+def _guard(path: Path, tree: bool) -> list[GuardFile]:
+    """The entries for one guard path: its canonical spelling and, when the path itself is
+    a symlink, the link's own spelling too (rewriting the link is a write to a guard path)."""
+    return [GuardFile(name, tree) for name in spellings(path)]
+
+
 def _guard_files(
     vaults: tuple[VaultInfo, ...], project_dir: Path | None, env: Mapping[str, str]
 ) -> list[GuardFile]:
-    """Files whose change could switch the guard off (spec section 5, self-protection)."""
+    """Files whose change could switch the guard off (spec section 5, self-protection).
+
+    Every entry is canonical, plus the link's own spelling where the entry is a symlink.
+    """
     home = _home(env)
-    files: list[GuardFile] = []
+    exact: list[Path] = []
+    trees: list[Path] = []
+    for vault in vaults:
+        trees.append(vault.root / ".labbrain")
+        exact.append(vault.root / ".copier-answers.yml")
     settings_bases = [v.root / ".claude" for v in vaults]
     if project_dir is not None:
         settings_bases.append(project_dir / ".claude")
     settings_bases.append(home / ".claude")
-    for vault in vaults:
-        files.append(GuardFile(vault.root / ".labbrain", True))
-        files.append(GuardFile(vault.root / ".copier-answers.yml", False))
-    for base in settings_bases:
-        files.extend(GuardFile(canonical(base / name), False) for name in SETTINGS_FILES)
-    trees = [home / ".claude" / "plugins"]
+    exact.extend(base / name for base in settings_bases for name in SETTINGS_FILES)
+    trees.append(home / ".claude" / "plugins")
     if env.get(ENV_PLUGIN_ROOT):
-        trees.append(canonical(env[ENV_PLUGIN_ROOT], home))
+        trees.append(Path(env[ENV_PLUGIN_ROOT]).expanduser())
     if env.get("UV_CACHE_DIR"):
-        trees.append(canonical(env["UV_CACHE_DIR"], home))
+        trees.append(Path(env["UV_CACHE_DIR"]).expanduser())
     else:
         trees.append(home / ".cache" / "uv")
         if env.get("XDG_CACHE_HOME"):
-            trees.append(canonical(Path(env["XDG_CACHE_HOME"]) / "uv", home))
-    files.extend(GuardFile(canonical(tree), True) for tree in trees)
+            trees.append(Path(env["XDG_CACHE_HOME"]).expanduser() / "uv")
+    files: list[GuardFile] = []
+    for path in exact:
+        files.extend(_guard(home / path, False))  # `home /` only anchors a relative value
+    for path in trees:
+        files.extend(_guard(home / path, True))
     return files
 
 

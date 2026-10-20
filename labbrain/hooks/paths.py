@@ -5,6 +5,12 @@ path starts with the root's, when the NFC-normalized casefolded spellings do (so
 matches `/data` even on a case-sensitive filesystem), or when the candidate or one of its
 parents is the same directory as the root by `(st_dev, st_ino)`. A root that does not exist
 is still matched by text; only the identity check needs it on disk.
+
+A path whose final component is a symlink has two spellings: the canonical one (the link's
+target) and its own (the link itself, its parent resolved). Roots, guard files and
+candidates are compared under both, so a guard file reached through a link is guarded at
+its target, and a link inside a root or guarded tree counts as inside even when it points
+elsewhere: rewriting or removing it changes that tree.
 """
 
 from __future__ import annotations
@@ -26,6 +32,22 @@ def canonical(p: Path | str, base: Path | None = None) -> Path:
     if not path.is_absolute() and base is not None:
         path = base / path
     return path.resolve(strict=False)
+
+
+def spellings(p: Path | str, base: Path | None = None) -> tuple[Path, ...]:
+    """(canonical,) or, when the final component is a symlink, (canonical, own spelling).
+
+    The own spelling is the path with every component but the last resolved, so it names
+    the link itself. Errors propagate as for `canonical`.
+    """
+    path = Path(p).expanduser()
+    if not path.is_absolute() and base is not None:
+        path = base / path
+    full = path.resolve(strict=False)
+    if path.name in ("", ".", ".."):
+        return (full,)
+    own = path.parent.resolve(strict=False) / path.name
+    return (full,) if own == full else (full, own)
 
 
 def fold(p: Path | str) -> str:
@@ -51,13 +73,15 @@ class ProtectedRoot:
     """One `data_paths` entry of one vault.
 
     `index` is the entry's 1-based position in that vault's `data_paths`, `configured` the
-    entry exactly as written, and `path` its canonical form.
+    entry exactly as written, and `path` its canonical form. When the entry itself is a
+    symlink, `link` is its own spelling (see `spellings`); otherwise it is None.
     """
 
     vault: Path
     index: int
     configured: str
     path: Path
+    link: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -74,7 +98,9 @@ class Targets:
     def __init__(self, roots: Sequence[ProtectedRoot], guard_files: Sequence[GuardFile]) -> None:
         self.roots: tuple[ProtectedRoot, ...] = tuple(roots)
         self.guard_files: tuple[GuardFile, ...] = tuple(guard_files)
-        self._folded = [(fold(r.path), r) for r in self.roots]
+        self._folded = [
+            (fold(path), r) for r in self.roots for path in (r.path, r.link) if path is not None
+        ]
         self._ids: dict[tuple[int, int], ProtectedRoot] = {}
         for root in self.roots:
             identity = _identity(root.path)
@@ -86,16 +112,19 @@ class Targets:
         return f"Targets(roots={len(self.roots)}, guard_files={len(self.guard_files)})"
 
     def containing(self, p: Path) -> ProtectedRoot | None:
-        """The root that canonical `p` is inside of or equal to, or None."""
-        candidate = canonical(p)
-        for root in self.roots:
-            if candidate == root.path or root.path in candidate.parents:
-                return root
-        key = fold(candidate)
-        for root_key, root in self._folded:
-            if _within(key, root_key):
-                return root
+        """The root that `p` (under either spelling) is inside of or equal to, or None."""
+        names = spellings(p)
+        for candidate in names:
+            for root in self.roots:
+                for path in (root.path, root.link):
+                    if path is not None and (candidate == path or path in candidate.parents):
+                        return root
+        for key in map(fold, names):
+            for root_key, root in self._folded:
+                if _within(key, root_key):
+                    return root
         if self._ids:
+            candidate = names[0]  # stat follows links: the own spelling has the same identity
             for part in (candidate, *candidate.parents):
                 identity = _identity(part)
                 if identity is not None and identity in self._ids:
@@ -103,14 +132,21 @@ class Targets:
         return None
 
     def under(self, p: Path) -> list[ProtectedRoot]:
-        """The roots strictly below canonical `p` (a recursive walk from `p` reaches them)."""
-        key = fold(canonical(p))
-        return [r for root_key, r in self._folded if root_key != key and _within(root_key, key)]
+        """The roots strictly below `p` (a recursive walk from `p` reaches them), each once,
+        in configured order. Both spellings of `p` and of each root count."""
+        keys = [fold(name) for name in spellings(p)]
+        found = {
+            id(r): r
+            for root_key, r in self._folded
+            for key in keys
+            if root_key != key and _within(root_key, key)
+        }
+        return [r for r in self.roots if id(r) in found]
 
     def is_guard_file(self, p: Path) -> bool:
-        """Whether canonical `p` is a guard file, or lies in a guarded tree."""
-        key = fold(canonical(p))
+        """Whether `p` (under either spelling) is a guard file, or lies in a guarded tree."""
         return any(
             _within(key, guard_key) if tree else key == guard_key
+            for key in map(fold, spellings(p))
             for guard_key, tree in self._guard_folded
         )

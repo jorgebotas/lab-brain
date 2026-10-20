@@ -402,6 +402,26 @@ CASES: list[tuple[str, str, str]] = [
     ("r27b-exit-status", 'python train.py; echo "exit: $?"; rc=$?; echo $rc $$', "allow"),
     ("r27b-arg-alone", "sh -c 'echo \"$1\"' _ hello", "allow"),
     ("r27b-args-alone", "sh -c 'ls \"$@\"' _ src docs", "allow"),
+    # --- ruling R34: a heredoc or herestring that a shell reads as its code is a command
+    # body, re-parsed like `sh -c` (an unquoted one after POSIX heredoc unescaping)
+    ("r34-sh-quoted", "sh <<'EOF'\nX=hi; cat ../mnt/p$X/rows.csv\nEOF", "deny"),
+    ("r34-sh-unquoted-esc", "sh <<EOF\nX=hi; cat ../mnt/p\\$X/rows.csv\nEOF", "deny"),
+    ("r34-bash-quoted", "bash <<'EOF'\nX=hi; cat ../mnt/p$X/rows.csv\nEOF", "deny"),
+    ("r34-bash-unquoted-esc", "bash <<EOF\nX=hi; cat ../mnt/p\\$X/rows.csv\nEOF", "deny"),
+    ("r34-sh-export", "sh <<'EOF'\nexport X=hi; cat ../mnt/p$X/rows.csv\nEOF", "deny"),
+    ("r34-bash-export-esc", "bash <<EOF\nexport X=hi; cat ../mnt/p\\$X/rows.csv\nEOF", "deny"),
+    ("r34-herestring", "bash <<<'X=hi; cat ../mnt/p$X/rows.csv'", "deny"),
+    ("r34-herestring-dq", 'sh <<<"X=hi; cat ../mnt/p\\$X/rows.csv"', "deny"),
+    ("r34-zsh-dash-s", "zsh -s <<'EOF'\nX=hi; cat ../mnt/p$X/rows.csv\nEOF", "deny"),
+    ("r34-bash-x-strip", "bash -x <<-'EOF'\n\tX=hi; cat ../mnt/p$X/rows.csv\n\tEOF", "deny"),
+    ("r34-dash-ksh", "dash <<'A'\nX=hi\nA\nksh <<'B'\nX=hi; ls ../mnt/p$X\nB", "deny"),
+    ("r34-second-heredoc", "cat <<'A' >x.txt\nhello\nA\nsh <<'B'\nd=phi; ls ../mnt/$d\nB", "deny"),
+    ("r34-env-sh", "env sh <<'EOF'\nX=hi; cat ../mnt/p$X/rows.csv\nEOF", "deny"),
+    ("r34-continuation", "sh <<EOF\nX=hi; cat ../mnt/p\\$X/\\\nrows.csv\nEOF", "deny"),
+    ("r34-options", "bash --rcfile x -o posix -- <<'EOF'\nX=hi; ls ../mnt/p$X\nEOF", "deny"),
+    ("r34-dash-operand", "sh - a <<'EOF'\nX=hi; ls ../mnt/p$X\nEOF", "deny"),
+    ("r34-echo-hello", "sh <<'EOF'\necho hello\nEOF", "allow"),
+    ("r34-echo-hello-unquoted", "bash <<EOF\necho \\$HOME is home\nEOF", "allow"),
     # --- everyday commands that must keep working
     ("script", "python train.py --config configs/a.yaml", "allow"),
     ("ls-parent", "ls {tmp}/mnt", "allow"),
@@ -496,6 +516,35 @@ GITIGNORED_CASES: list[tuple[str, str, str]] = [
     ("rg-explicit-data", "rg x data", "deny"),
     ("ls-star", "ls *", "deny"),
     ("ls-md", "ls *.md", "allow"),
+]
+
+
+# A fourth world (round 4, finding 1): Hive-style roots `<tmp>/mnt/run=1`, `run:1` and
+# `run,1`. A special parameter after the `=`, `:` or `,` completes them, so the whole word
+# keeps `*` even where its split piece is lone. Each row also runs from a clean cwd.
+PUNCT_ROOT_CASES: list[tuple[str, str, str]] = [
+    ("r33d-eq-ls", "false; ls ../mnt/run=$?", "deny"),
+    ("r33d-eq-grep", "false; grep -r . ../mnt/run=$?", "deny"),
+    ("r33d-eq-tar", "false; tar cf - ../mnt/run=$? | tar xOf -", "deny"),
+    ("r33d-eq-cd", "false; cd ../mnt/run=$? && cat rows.csv", "deny"),
+    ("r33d-eq-bound", "false; n=$?; ls ../mnt/run=$n", "deny"),
+    ("r33d-eq-pid", "ls ../mnt/run=$$", "deny"),
+    ("r33d-eq-count", "set -- a; ls ../mnt/run=$#", "deny"),
+    ("r33d-eq-cat", "false; cat ../mnt/run=$?/rows.csv", "deny"),
+    ("r33d-colon-ls", "false; ls ../mnt/run:$?", "deny"),
+    ("r33d-colon-grep", "false; grep -r . ../mnt/run:$?", "deny"),
+    ("r33d-comma-ls", "false; ls ../mnt/run,$?", "deny"),
+    ("r33d-comma-flags", "ls ../mnt/run,$-", "deny"),
+    ("r33d-eq-sh-c", "sh -c 'false; ls ../mnt/run=$?'", "deny"),
+    ("r33d-eq-heredoc", "sh <<'EOF'\nfalse; ls ../mnt/run=$?\nEOF", "deny"),
+    ("r33d-joined", "ls ../mnt/run$?", "deny"),
+    ("r33d-echo-rc-eq", 'python train.py; echo "rc=$?"', "allow"),
+    ("r33d-echo-rc-colon", 'python train.py; echo "status:$?"', "allow"),
+    ("r33d-echo-flags", 'echo "flags=$-"', "allow"),
+    ("r33d-echo-rc-labelled", 'python train.py; rc=$?; echo "rc=$rc"', "allow"),
+    ("r33d-echo-args", 'echo "args: $#" "exit code $?"', "allow"),
+    ("r33d-test-rc", "python train.py; [ $? -ne 0 ] && echo fail", "allow"),
+    ("r33d-log-pid", "python train.py > log_$$.txt 2> /tmp/train.$$.log; exit $?", "allow"),
 ]
 
 
@@ -664,6 +713,21 @@ def test_negative_status_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
 
 @pytest.mark.parametrize(
+    ("case_id", "command", "expected"), PUNCT_ROOT_CASES, ids=[c[0] for c in PUNCT_ROOT_CASES]
+)
+def test_punct_root_corpus(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case_id: str, command: str, expected: str
+) -> None:
+    """Round 4: roots named `run=1`, `run:1`, `run,1`, from the repo and a clean cwd."""
+    w = make_bash_world(tmp_path, monkeypatch, digit_roots=("run=1", "run:1", "run,1"))
+    assert len(w.scope().targets.roots) == 5
+    assert _decision(w.check(command)) == expected, w.render(command)
+    w.cwd = w.tmp / "work"  # a cwd with no links into a root
+    w.cwd.mkdir()
+    assert _decision(w.check(command)) == expected, ("clean cwd", w.render(command))
+
+
+@pytest.mark.parametrize(
     ("case_id", "command", "expected"), GITIGNORED_CASES, ids=[c[0] for c in GITIGNORED_CASES]
 )
 def test_gitignored_corpus(
@@ -681,7 +745,7 @@ def test_r27_rows_from_a_clean_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     w.cwd.mkdir()
     assert w.scope().protected
     for case_id, command, expected in CASES:
-        if case_id.startswith(("r27", "r29", "r33")):
+        if case_id.startswith(("r27", "r29", "r33", "r34")):
             assert _decision(w.check(command)) == expected, (case_id, w.render(command))
 
 
@@ -896,3 +960,24 @@ def test_lexer_failure_is_unconfident(tmp_path: Path, monkeypatch: pytest.Monkey
     assert w.check("echo 'unclosed") is None  # nothing names the root
     assert w.check("echo 'unclosed phi") is not None
     assert w.check('echo "$(unclosed') is not None
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        ([], True),
+        (["-x", "-e"], True),
+        (["-s", "a", "b"], True),
+        (["-xs", "a"], True),
+        (["-", "a"], True),
+        (["--"], True),
+        (["--norc", "--rcfile", "rc", "-o", "posix", "+O", "extglob"], True),
+        (["run.sh"], False),
+        (["-x", "run.sh", "a"], False),
+        (["--", "run.sh"], False),
+        (["--rcfile", "rc", "run.sh"], False),
+    ],
+)
+def test_shell_reads_stdin(args: list[str], expected: bool) -> None:
+    """R34: a shell reads its code from stdin with `-s`, `-`, or no script operand."""
+    assert bash._reads_stdin(args) is expected

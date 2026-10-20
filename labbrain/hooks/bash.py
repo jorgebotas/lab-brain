@@ -322,7 +322,6 @@ _ZSH_LENGTH = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012
 # R33b: zsh's unbraced flag forms, a run of = ~ ^ +, an optional #, then a name or special.
 _ZSH_FLAGGED = re.compile(r"[=~^+]+#?(?:[A-Za-z_][A-Za-z0-9_]*|[0-9?#$!@*-])")
 # R33c: the pieces a candidate is split into (`_PIECE_SPLIT`) and the text between them.
-_PIECE_TEXT = re.compile(r"[^=:,]+")
 _MARKS = re.compile("[\ue000-\ue007]")  # the pre-pass's own marks: never in a command
 # Ruling R19b: a whole-word `"$(cat <<'EOF' … EOF)"` stands for its literal heredoc body;
 # the pre-pass marks it _VAR _LOCAL k _END, which _Check.parse renumbers _VAR _LIT k _END.
@@ -362,6 +361,7 @@ _COMMENT_START = set(" \t\n;&|()")
 _SCAN_STOP = re.compile(r"[\\'\"$`#<\n()]")  # where the pre-pass has something to do
 _DQUOTE_STOP = re.compile(r'[\\"$`]')
 _BODY_STOP = re.compile(r"[\\$`]")
+_HEREDOC_ESCAPE = re.compile(r"\\([$`\\\n])")  # R34: what an unquoted heredoc unescapes
 _PLAIN = re.compile(r"[^ \t\r'\"\\();<>|&\n]+")
 _PUNCT_RUN = re.compile(r"[();<>|&\n]+")
 _BLANKS = re.compile(r"[ \t\r]+")
@@ -381,6 +381,7 @@ class _Scanned:
     end: int  # index just past the scanned region (at the closer, for a substitution)
     literals: list[list[str]] = field(default_factory=list)  # R19 outputs, by index
     literal_nested: set[int] = field(default_factory=set)  # nested[k] is a literal's `cat`
+    heredocs: list[str] = field(default_factory=list)  # R34: each heredoc as code, in order
 
 
 def _skip_quoted(text: str, i: int) -> int:
@@ -555,6 +556,10 @@ def _heredoc_delimiter(text: str, i: int) -> tuple[int, str, bool, bool]:
     return j, delimiter, quoted, strip
 
 
+def _unescape(match: re.Match[str]) -> str:
+    return "" if match.group(1) == "\n" else match.group(1)
+
+
 def _heredoc_bodies(
     text: str, i: int, pending: list[tuple[str, bool, bool]], scanned: _Scanned
 ) -> int:
@@ -569,6 +574,8 @@ def _heredoc_bodies(
                 break
             lines.append(line)
         body = "\n".join(lines)
+        # R34: the code a shell would read from it; unquoted, after POSIX heredoc unescaping
+        scanned.heredocs.append(body if quoted else _HEREDOC_ESCAPE.sub(_unescape, body))
         if quoted:
             scanned.literal.append(body)
         else:  # expansions still happen in an unquoted heredoc
@@ -798,34 +805,42 @@ def _operators(token: str) -> list[str]:
     return out
 
 
-def _simple_commands(tokens: Iterable[str]) -> list[tuple[list[str], int]]:
-    """The words of each simple command, and how many of them are redirection targets.
+def _simple_commands(tokens: Iterable[str]) -> list[tuple[list[str], int, list[str | None]]]:
+    """The words of each simple command, how many of them are redirection targets, and its
+    input redirections that feed text (R34): None for each `<<` heredoc, in order (its body
+    is the scan's), and the word of each `<<<` herestring.
 
     Redirections (operator, target, and an `n` or `{fd}` word before the operator) never
     hold the program word or an argument, at any position: their targets move to the end
     of the command, where they are still path candidates but not arguments (`python3
     <<'EOF'` has no script; `grep -R x 2>/dev/null` searches the cwd)."""
-    commands: list[tuple[list[str], int]] = []
+    commands: list[tuple[list[str], int, list[str | None]]] = []
     words: list[str] = []
     redirected: list[str] = []
-    target = False
+    fed: list[str | None] = []
+    target = herestring = False
 
     def flush() -> None:
-        nonlocal words, redirected, target
-        if words or redirected:
-            commands.append((words + redirected, len(redirected)))
-        words, redirected, target = [], [], False
+        nonlocal words, redirected, fed, target, herestring
+        if words or redirected or fed:
+            commands.append((words + redirected, len(redirected), fed))
+        words, redirected, fed, target, herestring = [], [], [], False, False
 
     for token in tokens:
         if not _is_operator(token):
             (redirected if target else words).append(token)
-            target = False
+            if herestring:
+                fed.append(token)
+            target = herestring = False
             continue
         for op in _operators(token):
             if op in _REDIRECT_OPS:
                 if words and _FD_WORD.fullmatch(words[-1]):
                     redirected.append(words.pop())  # `2>x`, `{fd}>x` (or `echo 2 >x`)
                 target = True
+                herestring = op == "<<<"
+                if op == "<<":
+                    fed.append(None)
             else:
                 flush()
     flush()
@@ -917,6 +932,30 @@ def _inline(name: str, args: Sequence[str]) -> bool:
     return True  # no script: the code comes from stdin (a heredoc, a pipe)
 
 
+_SHELL_VALUES: frozenset[str] = frozenset({"--rcfile", "--init-file"})
+
+
+def _reads_stdin(args: Sequence[str]) -> bool:
+    """R34: whether a shell given `args` (no `-c`) reads its code from stdin: `-s`, `-`, or
+    no script operand."""
+    j = 0
+    while j < len(args):
+        arg = args[j]
+        if arg == "-":
+            return True
+        if arg == "--":
+            return j + 1 >= len(args)
+        if arg.startswith("--"):
+            j += 2 if arg in _SHELL_VALUES else 1
+        elif arg[:1] in "-+" and len(arg) > 1:
+            if "s" in arg[1:]:
+                return True
+            j += 2 if arg[-1] in "oO" else 1
+        else:
+            return False  # a script file: stdin is its data
+    return True
+
+
 # --------------------------------------------------------------------------- the analysis
 
 
@@ -932,11 +971,11 @@ class _Simple:
 
     @property
     def first(self) -> list[str]:
-        return [alts[0] if alts else "" for alts in self.expanded]
+        return [_short(alts[0], True) if alts else "" for alts in self.expanded]
 
     def args(self, view: _View) -> list[str]:
         end = len(self.expanded) - self.targets
-        return [a for alts in self.expanded[view.pos + 1 : end] for a in alts]
+        return [_short(a, True) for alts in self.expanded[view.pos + 1 : end] for a in alts]
 
 
 @dataclass
@@ -1005,13 +1044,15 @@ class _Check:
             self.unconfident = True
         bindings: dict[str, list[str]] = {}
         nested = list(scanned.nested)
-        for words, targets in _simple_commands(tokens):
+        heredocs = iter(scanned.heredocs)
+        for words, targets, fed in _simple_commands(tokens):
+            stdin = [next(heredocs, "") if text is None else text for text in fed]
             simple = self._simple(words, bindings, targets)
             if literal_form:
                 self.literal_forms.add(len(self.simples))
             self.simples.append(simple)
             self._bind(words, simple, bindings)
-            nested.extend(self._nested_texts(simple))
+            nested.extend(self._nested_texts(simple, stdin))
         for body in (scanned.marked, *scanned.literal):
             self.raw.append((body, bindings))
         for k, inner in enumerate(nested):
@@ -1120,8 +1161,9 @@ class _Check:
                 value_list = [value]
             bindings[name] = bindings.get(name, []) + value_list
 
-    def _nested_texts(self, simple: _Simple) -> list[str]:
-        """Command strings this simple command hands to a shell: sh -c, eval, env -S."""
+    def _nested_texts(self, simple: _Simple, stdin: Sequence[str] = ()) -> list[str]:
+        """Command strings this simple command hands to a shell: sh -c, eval, env -S, and
+        (R34) the heredocs and herestrings `stdin` of a shell that reads its code there."""
         texts: list[str] = []
         words = simple.marked
         for view in simple.views:
@@ -1131,6 +1173,10 @@ class _Check:
                     if word.startswith("-") and not word.startswith("--") and "c" in word:
                         texts.append(rest[k + 1])
                         break
+                else:
+                    end = len(words) - simple.targets
+                    if view.name in SHELLS and _reads_stdin(words[view.pos + 1 : end]):
+                        texts.extend(stdin)
             elif view.name == "eval":
                 texts.append(" ".join(rest))
             elif view.name == "env":
@@ -1204,16 +1250,16 @@ class _Check:
         """`text` brace-expanded, then split at = : , and glued short options:
         (piece, is the whole text)."""
         for whole in _braces(text):
-            yield self._tilde(whole), True
+            yield self._tilde(_short(whole, True)), True
             pieces = _PIECE_SPLIT.split(whole)
             for piece in pieces[1:] if len(pieces) > 1 else ():
-                yield self._tilde(piece), False
+                yield self._tilde(_short(piece, False)), False
             glued = _GLUED_OPTION.match(whole)
             if glued:
-                yield self._tilde(whole[glued.end() :]), False
+                yield self._tilde(_short(whole[glued.end() :], False)), False
             if WILD not in whole and STICKY.search(whole):
                 for piece in sticky_pieces(whole):
-                    yield self._tilde(piece), False
+                    yield self._tilde(_short(piece, False)), False
 
     def _add(self, candidate: _Candidate) -> None:
         text = candidate.text
@@ -1678,7 +1724,9 @@ def _params(word: str) -> str:
 
     From zsh's length form (`$#hi`), the rest of the word is WILD. A word made only of
     `$? $# $$ $! $-` names no path: each is `_`. Joined to anything else, each is `*`
-    (R32), unless it is alone in a piece split at `=`, `:` or `,` (R33c: `rc=$?`). As `*`,
+    (R32), unless it is alone in a piece split at `=`, `:` or `,` (R33c: `rc=$?`); those
+    marks stay in the word for `_short` to resolve, once the whole word and its pieces are
+    known. As `*`,
     rule 5 judges it like any glob, and since it can hold no `/` or `..` it does not
     deny as a leading WILD would. A positional parameter alone (`$1`, `"$@"`) holds one
     word of the command, a candidate in its own right: `_`. Joined to anything, another
@@ -1687,14 +1735,19 @@ def _params(word: str) -> str:
         word = word[: word.index(_REST)] + WILD
     if word == _POSITIONAL or (word and not word.strip(_SHORT)):
         return "_" * len(word)
-    if _SHORT in word:  # R33c: a piece (split at = : ,) made only of them is lone too
-        word = _PIECE_TEXT.sub(_short_piece, word)
     return word.replace(_POSITIONAL, WILD) if _POSITIONAL in word else word
 
 
-def _short_piece(match: re.Match[str]) -> str:
-    piece = match.group()
-    return "_" * len(piece) if not piece.strip(_SHORT) else piece.replace(_SHORT, "*")
+def _short(text: str, whole: bool) -> str:
+    """R33c, after piece splitting (round 4): the `$? $# $$ $! $-` marks `_params` left in
+    `text`. A whole word reads each as `*` (`run=$?` can name a root `run=1`); a piece split
+    from it at `=`, `:` or `,` that is made only of them is `_` (`rc=$?` gives the piece
+    `_`), and any other piece reads each as `*`."""
+    if _SHORT not in text:
+        return text
+    if not whole and not text.strip(_SHORT):
+        return "_" * len(text)
+    return text.replace(_SHORT, "*")
 
 
 def _delimited(word: str, text: str, *, loose: bool = False) -> bool:

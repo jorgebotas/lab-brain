@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 from helpers import MIN_CONFIG, hook_payload, make_vault, write
 
-from labbrain.hooks import bash, guard
+from labbrain.hooks import bash, exposure, guard
 from labbrain.hooks.entry import run_hook
 from labbrain.hooks.payload import Denial, Payload, parse_payload
 from labbrain.hooks.scope import Scope, load_scope
@@ -282,6 +282,7 @@ def test_glob_recursive_bases(world: World) -> None:
     denied(world, "Glob", {"pattern": "notes/../lnk/*"})
     denied(world, "Glob", {"pattern": f"{world.vault.name}/lnk/*"})  # stripped, then the link
     denied(world, "Glob", {"pattern": "/lnk/*"})  # anchored at path
+    (world.vault / "lnk").unlink()  # the link alone now denies any Glob from the vault (R10)
     # ripgrep reads a leading `!` as an exclusion, listing everything else; `\` escapes.
     for path in (tmp, world.vault):
         for pattern in ("!nothing/here", "!/x", "!*.md", "notes/!x/*", "notes\\*.md", "\\!x"):
@@ -292,6 +293,41 @@ def test_glob_recursive_bases(world: World) -> None:
     allowed(world, "Glob", {"pattern": f"{deep}/*.md"})
     denied(world, "Glob", {"pattern": f"{deep}/d/*.md"})  # too many literal directories: unsure
     denied(world, "Glob", {"pattern": f"{world.vault}/{deep}/x"})  # absolute: counted the same
+
+
+def test_glob_and_grep_link_exposure(world: World) -> None:
+    """R10: a link below a search base into a protected root denies Glob and Grep."""
+    calls = [
+        ("Glob", {"pattern": "**/*.csv"}),
+        ("Glob", {"pattern": f"{world.vault}/**/*.csv"}),
+        ("Glob", {"pattern": "*.csv", "path": str(world.vault / "notes")}),
+        ("Grep", {"pattern": "x"}),
+        ("Grep", {"pattern": "x", "path": str(world.vault / "notes")}),
+    ]
+    for tool, args in calls:
+        allowed(world, tool, args)
+    (world.vault / "notes" / "data").symlink_to(world.phi, target_is_directory=True)
+    for tool, args in calls:
+        denied(world, tool, args)
+    allowed(world, "Grep", {"pattern": "x", "path": str(world.vault / "notes" / "n.md")})
+    world.env["RIPGREP_CONFIG_PATH"] = str(world.tmp / "rg.conf")  # rg could follow links
+    for tool, args in calls:
+        denied(world, tool, args)
+
+
+def test_glob_and_grep_link_walk_cached(world: World) -> None:
+    """The walk is cached under $CLAUDE_PLUGIN_DATA, per session, like Bash rule 6b's."""
+    world.env["CLAUDE_PLUGIN_DATA"] = str(world.tmp / "plugin-data")
+    (world.vault / "data").symlink_to(world.phi, target_is_directory=True)
+    denied(world, "Glob", {"pattern": "**/*.csv"})
+    assert list((world.tmp / "plugin-data" / "exposure").glob("*.json"))
+    denied(world, "Grep", {"pattern": "x"})
+
+
+def test_glob_and_grep_truncated_walk_denied(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(exposure, "WALK_LIMIT", 1)
+    denied(world, "Glob", {"pattern": "**/*.md"})
+    denied(world, "Grep", {"pattern": "x"})
 
 
 # --- Bash routing -------------------------------------------------------------------------

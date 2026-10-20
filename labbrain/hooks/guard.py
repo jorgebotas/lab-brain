@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from labbrain.hooks import bash
+from labbrain.hooks.exposure import links_under
 from labbrain.hooks.paths import PATHLIKE as PATHLIKE  # re-exported for callers of guard
 from labbrain.hooks.paths import ProtectedRoot, fold, path_runs, readings, sticky_pieces
 from labbrain.hooks.paths import canonical as canonical  # re-exported for callers of guard
@@ -138,9 +139,9 @@ def _check(payload: Payload, scope: Scope, subject: str) -> Denial | None:
     if tool in FILE_TOOLS:
         return _file_tool(tool, args, cwd, scope, subject)
     if tool == "Grep":
-        return _grep(args, cwd, scope, subject)
+        return _grep(args, cwd, scope, subject, payload.session_id)
     if tool == "Glob":
-        return _glob(args, cwd, scope, subject)
+        return _glob(args, cwd, scope, subject, payload.session_id)
     if tool == "Bash":
         command = args.get("command")
         if not isinstance(command, str):
@@ -172,10 +173,31 @@ def _start(args: dict[str, Any], cwd: Path) -> list[Path]:
     return _readings(str(cwd) if value is None or value == "" else value, cwd)
 
 
-def _grep(args: dict[str, Any], cwd: Path, scope: Scope, subject: str) -> Denial | None:
-    root = _reach(_start(args, cwd), scope)  # treated as rg: a recursive search enters roots
+def _exposed(bases: Iterable[Path], scope: Scope, session_id: str) -> bool:
+    """R10: whether a link below one of the directories `bases` leads into a protected root
+    (Bash rule 6b's walk, cached the same way). A truncated walk is unsure."""
+    data = scope.env.get("CLAUDE_PLUGIN_DATA")
+    cache = Path(data) if data else None
+    for base in dict.fromkeys(bases):
+        if not base.is_dir():
+            continue
+        scan = links_under(base, scope.targets, cache, session_id)
+        if scan.truncated:
+            raise _Unsure
+        if scan.found:
+            return True
+    return False
+
+
+def _grep(
+    args: dict[str, Any], cwd: Path, scope: Scope, subject: str, session_id: str
+) -> Denial | None:
+    starts = _start(args, cwd)
+    root = _reach(starts, scope)  # treated as rg: a recursive search enters roots
     if root is not None:
         return data_denial(root, subject)
+    if _exposed(starts, scope, session_id):
+        return data_denial(scope.targets.roots[0], subject)
     glob = args.get("glob")
     if glob is not None:
         if not isinstance(glob, str):
@@ -186,18 +208,24 @@ def _grep(args: dict[str, Any], cwd: Path, scope: Scope, subject: str) -> Denial
     return None
 
 
-def _glob(args: dict[str, Any], cwd: Path, scope: Scope, subject: str) -> Denial | None:
+def _glob(
+    args: dict[str, Any], cwd: Path, scope: Scope, subject: str, session_id: str
+) -> Denial | None:
     """Glob is a recursive construct (R20), like rule 6a for Bash.
 
     Claude Code rewrites a pattern before ripgrep runs it, so the pattern is not matched. It
     is denied when any directory it may search from holds a protected root or lies inside
-    one, or when ripgrep could read it as an exclusion (`!`) or an escape (`\\`).
+    one, or holds a link into one (R10), or when ripgrep could read it as an exclusion
+    (`!`) or an escape (`\\`).
     """
     pattern = args.get("pattern")
     if not isinstance(pattern, str):
         raise _Unsure
     bases = _glob_bases(pattern, _start(args, cwd), scope.env)
-    root = _reach((path for base in bases for path in _readings(str(base), cwd)), scope)
+    paths = [path for base in bases for path in _readings(str(base), cwd)]
+    root = _reach(paths, scope)
+    if root is None and _exposed(paths, scope, session_id):
+        root = scope.targets.roots[0]
     return None if root is None else data_denial(root, subject)
 
 

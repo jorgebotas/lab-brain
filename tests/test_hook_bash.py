@@ -247,6 +247,7 @@ CASES: list[tuple[str, str, str]] = [
     ("r19e-git-unknown-sub", "git x " + _h("README.md"), "deny"),
     ("r19e-gh-extension", "gh x " + _h("README.md"), "deny"),
     ("r19e-nested-subst", "git commit -m " + _h("README.md") + ' --author "$(id -un)"', "deny"),
+    ("r19e-push-receive-pack", "git push --receive-pack " + _h("cat README.md") + " x", "deny"),
     ("r19e-git-C-commit", "git -C . commit -m " + _h("fix: tidy"), "allow"),
     ("r19e-commit-F-stdin", "git commit -F - <<'EOF'\nfix: tidy\n\nbody\nEOF", "allow"),
     ("r19d-add-commit", "git add x && git commit -m " + _h("fix: tidy"), "allow"),

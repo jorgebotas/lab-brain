@@ -319,10 +319,10 @@ _ANY_ASSIGN = re.compile(r"(?:^|[^\w./-])[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\s
 # R19e: and every program word, bar the literal form's own `cat`, is `git` or `gh` running
 # one of these built-in subcommands (an alias or a git-x / gh extension could be anything),
 # with no git option that changes configuration or where git finds its programs.
+# (Not push, fetch or pull: --receive-pack, --upload-pack and --exec run their value.)
 LITERAL_GIT_SUBCOMMANDS: frozenset[str] = frozenset(
     {"add", "commit", "tag", "notes", "merge", "stash", "status", "diff", "log", "show"}
-    | {"push", "pull", "fetch", "checkout", "switch", "branch", "restore", "reset", "rm"}
-    | {"mv"}
+    | {"checkout", "switch", "branch", "restore", "reset", "rm", "mv"}
 )
 LITERAL_GH_SUBCOMMANDS: frozenset[str] = frozenset(
     {"pr", "issue", "release", "label", "gist", "repo", "run", "workflow", "api", "status"}

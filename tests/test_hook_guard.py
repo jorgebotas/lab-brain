@@ -287,9 +287,11 @@ def test_glob_recursive_bases(world: World) -> None:
         for pattern in ("!nothing/here", "!/x", "!*.md", "notes/!x/*", "notes\\*.md", "\\!x"):
             denied(world, "Glob", {"pattern": pattern, "path": str(path)})
     allowed(world, "Glob", {"pattern": "notes/x!/*.md"})  # `!` not leading a component
-    deep = "/".join(["d"] * guard.MAX_GLOB_NAMES)
+    assert guard.MAX_GLOB_NAMES == 16  # ruling R23
+    deep = "/".join(f"d{n}" for n in range(16))
     allowed(world, "Glob", {"pattern": f"{deep}/*.md"})
     denied(world, "Glob", {"pattern": f"{deep}/d/*.md"})  # too many literal directories: unsure
+    denied(world, "Glob", {"pattern": f"{world.vault}/{deep}/x"})  # absolute: counted the same
 
 
 # --- Bash routing -------------------------------------------------------------------------

@@ -48,7 +48,7 @@ PATH_KEYS = ("file_path", "notebook_path", "path")
 GLOB_SPECIAL = frozenset("*?[]{}!\\")
 # Claude Code's own cut (GKo): its search starts at the last `/` before the first of these.
 GKO_SPECIAL = frozenset("*?[{")
-MAX_GLOB_NAMES = 64  # more literal leading directories than this in a Glob pattern: deny
+MAX_GLOB_NAMES = 16  # more literal leading directories than this in a Glob pattern: deny (R23)
 
 MAX_DEPTH = 20  # containers nested deeper than this in tool_input are not walked: deny
 MAX_STRINGS = 2000  # more strings than this in tool_input: deny

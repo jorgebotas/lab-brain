@@ -312,6 +312,22 @@ _LIT_REF = re.compile(f"{_VAR}{_LIT}[0-9]+{_END}")
 # R19c(c): a command that could redefine `cat` (or what runs as it) gets no literals.
 _FUNCTION_DEF = re.compile(r"(?:^|[\s;&|(){}])function\s+\S|[^\s;&|(){}<>]\s*\(\s*\)")
 LITERAL_SPOILERS: tuple[str, ...] = ("alias", "unalias", "shopt", "enable", "hash")
+# R19d: literals need a command with no assignment (NAME=, NAME+=, NAME[x]=, NAME:=, and
+# arithmetic's `NAME = 3` or `NAME <<= 3`, at a word's start or after punctuation, in each
+# lexed word and in the marked text), none of these program words (after wrappers; all but
+# `.` also as any other word), and no carriage return. Comparisons count too.
+_ANY_ASSIGN = re.compile(r"(?:^|[^\w./-])[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\s*[-+*/%&|^:<>]*=")
+LITERAL_PROGRAM_WORDS: frozenset[str] = frozenset(
+    {"set", "unset", "trap", "export", "declare", "typeset", "local", "readonly", "builtin"}
+    | {"command", "eval", "source", ".", "alias", "unalias", "shopt", "enable", "hash"}
+    | {"autoload", "functions", "emulate", "setopt", "unsetopt", "zmodload", "exec", "cd"}
+    | {"pushd", "popd"}
+    # beyond R19d's list: builtins that assign a named variable without `=`
+    | {"read", "mapfile", "readarray", "getopts", "let", "vared", "zparseopts", "sysread"}
+    | {"zformat", "strftime", "zstyle", "zregexparse"}
+)
+# Builtins that assign a variable through an option: printf -v, print -v (zsh), wait -p.
+LITERAL_SETTER_FLAGS: Mapping[str, str] = {"printf": "v", "print": "v", "wait": "p"}
 # Raw-text runs are split at these characters, never matched with a backtracking regex
 # (that is quadratic on long undelimited text); a run is a candidate when it holds / ~ or .
 _RAW_DELIMITERS = re.compile(r"[\s'\"`()<>;|&=,]+")
@@ -1451,8 +1467,13 @@ class _Check:
         return result.returncode == 0
 
     def _literals_unsafe(self) -> bool:
-        """R19c(c): could this command redefine `cat`, or is it dynamic already?"""
-        if self.unconfident or self.dangerous:
+        """R19c(c): could this command redefine `cat`, or is it dynamic already?
+        R19d: or does it assign, change the shell's state, or hold a carriage return?"""
+        if self.unconfident or self.dangerous or "\r" in self.command:
+            return True
+        if any(_ANY_ASSIGN.search(text) for text in self.marked_texts):
+            return True
+        if any(self._changes_shell(simple) for simple in self.simples):
             return True
         text = "\n".join(fold(t) for t in self.marked_texts)
         if _FUNCTION_DEF.search(text):
@@ -1465,6 +1486,24 @@ class _Check:
             for simple in self.simples
             for word in simple.marked
         )
+
+    @staticmethod
+    def _changes_shell(simple: _Simple) -> bool:
+        """R19d (a) and (b) for one simple command, on its marked words (no heredoc body)."""
+        words = simple.marked
+        if any(_ANY_ASSIGN.search(word) for word in words):
+            return True
+        if any(fold(word) in LITERAL_PROGRAM_WORDS - {"."} for word in words):
+            return True
+        views = [*simple.views, *_views(words)]
+        if any(view.name in LITERAL_PROGRAM_WORDS for view in views):
+            return True
+        for view in views:
+            flag = LITERAL_SETTER_FLAGS.get(view.name)
+            options = [w for w in words[view.pos + 1 :] if w.startswith("-") and w != "--"]
+            if flag and any(flag in option for option in options):
+                return True
+        return False
 
     def _reparse_without_literals(self) -> None:
         self.simples, self.raw, self.literals, self.marked_texts = [], [], [], []

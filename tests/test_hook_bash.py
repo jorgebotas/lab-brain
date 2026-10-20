@@ -201,6 +201,51 @@ CASES: list[tuple[str, str, str]] = [
     ),
     ("commit-heredoc-apostrophe", "git commit -m " + _h("fix: don't drop rows"), "allow"),
     ("head-literal-file", "head " + _h("README.md"), "allow"),
+    # ruling R19d: literals only without assignments, environment-changing builtins or \r;
+    # every body names a real file (README.md in the cwd), so a wrong allow is meaningful
+    ("r19d-ifs-prefix", "IFS=/ head " + _h("README.md"), "deny"),
+    ("r19d-bash-env-commit", "BASH_ENV=x git commit -m " + _h("README.md"), "deny"),
+    ("r19d-env-prefix", "ENV=x head " + _h("README.md"), "deny"),
+    ("r19d-standalone-assign", "X=1; head " + _h("README.md"), "deny"),
+    ("r19d-subscript-assign", "functions[cat]='echo x'; head " + _h("README.md"), "deny"),
+    ("r19d-array-assign", "BASH_ALIASES[cat]=x; head " + _h("README.md"), "deny"),
+    ("r19d-append-assign", "PATH+=:b; head " + _h("README.md"), "deny"),
+    ("r19d-zsh-array", "path=(b $path); head " + _h("README.md"), "deny"),
+    ("r19d-arith-assign", "(( IFS = 3 )); head " + _h("README.md"), "deny"),
+    ("r19d-arith-comma", "echo $((y,IFS=3)); head " + _h("README.md"), "deny"),
+    ("r19d-param-default", "echo ${{IFS:=/}}; head " + _h("README.md"), "deny"),
+    ("r19d-trap-debug", "trap 'x' DEBUG; head " + _h("README.md"), "deny"),
+    ("r19d-export-f", "export -f f; head " + _h("README.md"), "deny"),
+    ("r19d-declare-f", "declare -f; head " + _h("README.md"), "deny"),
+    ("r19d-setopt", "setopt x; head " + _h("README.md"), "deny"),
+    ("r19d-cd-parent", "cd .. && head " + _h("repo/README.md"), "deny"),
+    ("r19d-builtin-cd", "builtin cd .. && head " + _h("repo/README.md"), "deny"),
+    ("r19d-wrapped-setopt", "noglob setopt x; head " + _h("README.md"), "deny"),
+    ("r19d-if-set", "if set -f; then head " + _h("README.md") + "; fi", "deny"),
+    ("r19d-read-ifs", "read -r IFS <<<x; head " + _h("README.md"), "deny"),
+    ("r19d-printf-v", "printf -v IFS x; head " + _h("README.md"), "deny"),
+    ("r19d-crlf-commit", "git commit -m " + _h("README.md").replace("\n", "\r\n"), "deny"),
+    ("r19d-cr-body", "head " + _h("README.md\r"), "deny"),
+    ("r19d-cr-trailing", "head " + _h("README.md") + "\r", "deny"),
+    *[
+        (f"r19d-prog-{word}", f"{word} x; head " + _h("README.md"), "deny")
+        for word in (
+            *("set", "unset", "trap", "export", "declare", "typeset", "local", "readonly"),
+            *("builtin", "command", "eval", "source", ".", "alias", "unalias", "shopt"),
+            *("enable", "hash", "autoload", "functions", "emulate", "setopt", "unsetopt"),
+            *("zmodload", "exec", "cd", "pushd", "popd"),
+            *("read", "mapfile", "readarray", "getopts", "let", "vared"),
+        )
+    ],
+    ("r19d-add-commit", "git add x && git commit -m " + _h("fix: tidy"), "allow"),
+    ("r19d-add-dot-commit", "git add . && git commit -m " + _h("fix: tidy"), "allow"),
+    ("r19d-gh-pr", "gh pr create --title t --body " + _h("## Summary\n- x"), "allow"),
+    (
+        "r19d-body-words",
+        "git commit -m "
+        + _h("set up PATH=/x and export it\n\ncd docs; unset X; trap; declare -f\nIFS=/ x"),
+        "allow",
+    ),
     # ruling R19a: escapes and other conversions are not literal
     ("printf-escape", "cat {tmp}/mnt/$(printf 'p\\x68i')/rows.csv", "deny"),
     ("echo-e-escape", "cat {tmp}/mnt/$(echo -e 'p\\x68i')/rows.csv", "deny"),

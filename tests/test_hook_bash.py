@@ -250,6 +250,59 @@ CASES: list[tuple[str, str, str]] = [
     ("r19e-push-receive-pack", "git push --receive-pack " + _h("cat README.md") + " x", "deny"),
     ("r19e-git-C-commit", "git -C . commit -m " + _h("fix: tidy"), "allow"),
     ("r19e-commit-F-stdin", "git commit -F - <<'EOF'\nfix: tidy\n\nbody\nEOF", "allow"),
+    # fix round 5: a leading redirection never hides the program word
+    (
+        "r5-redir-python",
+        """>/dev/null python3 -c "print(open('mnt/p'+'hi/rows.csv').read())\"""",
+        "deny",
+    ),
+    (
+        "r5-redir-fd-python",
+        """2>/dev/null python3 -c "print(open('mnt/p'+'hi/rows.csv').read())\"""",
+        "deny",
+    ),
+    ("r5-redir-sh", """>x sh -c 'cat mnt/p""hi/rows.csv'""", "deny"),
+    ("r5-redir-stdin-sh", """</dev/null sh -c 'cat mnt/p""hi/rows.csv'""", "deny"),
+    ("r5-redir-eval", """>x eval 'cat mnt/p""hi/rows.csv'""", "deny"),
+    ("r5-redir-git-diff", ">git diff " + _h("README.md") + " x", "deny"),
+    ("r5-redir-amp-git-log", "&>git log " + _h("README.md"), "deny"),
+    ("r5-redir-lt-git-mv", "<git mv " + _h("README.md") + " x", "deny"),
+    ("r5-redir-clobber-git", ">|git log " + _h("README.md"), "deny"),
+    ("r5-redir-append-amp-git", "&>>git log " + _h("README.md"), "deny"),
+    ("r5-commit-redirect", "git commit -m " + _h("fix: tidy") + " >/dev/null 2>&1", "allow"),
+    # fix round 5: the program word itself is exactly git or gh, not a path or a case variant
+    ("r5-dot-git", "./git commit -m " + _h("README.md"), "deny"),
+    ("r5-abs-git", "/tmp/x/git commit -m " + _h("README.md"), "deny"),
+    ("r5-rel-gh", "bin/gh pr create --body " + _h("README.md"), "deny"),
+    ("r5-git-upper-sub", "git COMMIT -m " + _h("README.md"), "deny"),
+    ("r5-gh-upper-sub", "gh PR create --body " + _h("README.md"), "deny"),
+    ("r5-git-upper", "GIT commit -m " + _h("README.md"), "deny"),
+    ("r5-quoted-git-sub", '"git commit" -m ' + _h("README.md"), "deny"),
+    # fix round 5: gh passes arguments after a bare `--` to git
+    ("r5-gh-clone-upload-pack", "gh repo clone o/r -- --upload-pack " + _h("README.md"), "deny"),
+    ("r5-gh-clone-config", "gh repo clone o/r -- -c " + _h("README.md"), "deny"),
+    ("r5-gh-dashdash", "gh issue create --title t --body " + _h("README.md") + " --", "deny"),
+    ("r5-gh-gist", "gh gist create --desc " + _h("README.md"), "deny"),
+    # R19e on its own: a nested substitution's program word (`date`, not git) spoils the
+    # literal; the same command with `$(git log -1)` is allowed
+    (
+        "r5-nested-program",
+        "git commit -m " + _h("README.md") + " -F - <<EOF\n$(date)\nEOF",
+        "deny",
+    ),
+    (
+        "r5-nested-git",
+        "git commit -m " + _h("fix: tidy") + " -F - <<EOF\n$(git log -1)\nEOF",
+        "allow",
+    ),
+    # fix round 5: redirection targets are not arguments (no script, no cd target)
+    ("r5-heredoc-no-script", "python3 <<'EOF'\nopen('mnt/p'+'hi/rows.csv')\nEOF", "deny"),
+    ("r5-heredoc-first", "<<'EOF' python3\nopen('mnt/p'+'hi/rows.csv')\nEOF", "deny"),
+    ("r5-cd-home-redirect", "cd 2>/dev/null && cat phi/rows.csv", "deny"),
+    ("r5-script-stdin", "python3 train.py <configs/a.yaml", "allow"),
+    # ruling R26: rule 8 also reads the raw text with its quote characters removed
+    ("r26-quotes-removed", """echo 'cat mnt/p""hi/rows.csv' | sh""", "deny"),
+    ("r26-backslash-removed", "echo 'cat mnt/p\\hi/rows.csv' | sh", "deny"),
     ("r19d-add-commit", "git add x && git commit -m " + _h("fix: tidy"), "allow"),
     ("r19d-add-dot-commit", "git add . && git commit -m " + _h("fix: tidy"), "allow"),
     ("r19d-gh-pr", "gh pr create --title t --body " + _h("## Summary\n- x"), "allow"),

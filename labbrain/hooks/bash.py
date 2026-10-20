@@ -325,8 +325,8 @@ LITERAL_GIT_SUBCOMMANDS: frozenset[str] = frozenset(
     | {"checkout", "switch", "branch", "restore", "reset", "rm", "mv"}
 )
 LITERAL_GH_SUBCOMMANDS: frozenset[str] = frozenset(
-    {"pr", "issue", "release", "label", "gist", "repo", "run", "workflow", "api", "status"}
-    | {"search", "browse"}
+    {"pr", "issue", "release", "label", "run", "workflow", "api", "status", "search"}
+    | {"browse"}  # not repo or gist: `gh repo clone … -- <git flags>`
 )
 LITERAL_GIT_UNSAFE: tuple[str, ...] = ("-c", "--config-env", "--exec-path")
 # Raw-text runs are split at these characters, never matched with a backtracking regex
@@ -745,15 +745,58 @@ def _is_separator(token: str) -> bool:
     return any(c in _SEPARATORS for c in re.sub(r"[<>]&", "", token))
 
 
-def _simple_commands(tokens: Iterable[str]) -> list[list[str]]:
-    commands: list[list[str]] = [[]]
+# Operators a run of _PUNCT characters splits into, longest first (`2>&1|x`, `;>f`, `&>f`).
+_SEPARATOR_OPS: tuple[str, ...] = (";;&", ";;", ";&", "&&", "||", "|&", ";", "&", "|", "(", ")")
+_REDIRECT_OPS: tuple[str, ...] = ("<<<", "&>>", "<<", ">>", "<>", ">|", "&>", "<&", ">&", "<", ">")
+_OPERATORS: tuple[str, ...] = tuple(
+    sorted((*_SEPARATOR_OPS, *_REDIRECT_OPS, "\n"), key=len, reverse=True)
+)
+_FD_WORD = re.compile(r"[0-9]+|\{[A-Za-z_][A-Za-z0-9_]*\}")
+
+
+def _operators(token: str) -> list[str]:
+    """The shell operators a run of operator characters stands for."""
+    out: list[str] = []
+    i = 0
+    while i < len(token):
+        op = next(o for o in _OPERATORS if token.startswith(o, i))
+        out.append(op)
+        i += len(op)
+    return out
+
+
+def _simple_commands(tokens: Iterable[str]) -> list[tuple[list[str], int]]:
+    """The words of each simple command, and how many of them are redirection targets.
+
+    Redirections (operator, target, and an `n` or `{fd}` word before the operator) never
+    hold the program word or an argument, at any position: their targets move to the end
+    of the command, where they are still path candidates but not arguments (`python3
+    <<'EOF'` has no script; `grep -R x 2>/dev/null` searches the cwd)."""
+    commands: list[tuple[list[str], int]] = []
+    words: list[str] = []
+    redirected: list[str] = []
+    target = False
+
+    def flush() -> None:
+        nonlocal words, redirected, target
+        if words or redirected:
+            commands.append((words + redirected, len(redirected)))
+        words, redirected, target = [], [], False
+
     for token in tokens:
-        if _is_operator(token):
-            if _is_separator(token) and commands[-1]:
-                commands.append([])
-            continue  # a redirection operator; its target is the next word
-        commands[-1].append(token)
-    return [c for c in commands if c]
+        if not _is_operator(token):
+            (redirected if target else words).append(token)
+            target = False
+            continue
+        for op in _operators(token):
+            if op in _REDIRECT_OPS:
+                if words and _FD_WORD.fullmatch(words[-1]):
+                    redirected.append(words.pop())  # `2>x`, `{fd}>x` (or `echo 2 >x`)
+                target = True
+            else:
+                flush()
+    flush()
+    return commands
 
 
 # ---------------------------------------------------------------------------- the views
@@ -852,13 +895,15 @@ class _Simple:
     expanded: list[list[str]]  # per word: every value it can take
     views: list[_View]
     exempt: set[int] = field(default_factory=set)  # word positions: the `uvx --from` value
+    targets: int = 0  # the last `targets` words are redirection targets, not arguments
 
     @property
     def first(self) -> list[str]:
         return [alts[0] if alts else "" for alts in self.expanded]
 
     def args(self, view: _View) -> list[str]:
-        return [a for alts in self.expanded[view.pos + 1 :] for a in alts]
+        end = len(self.expanded) - self.targets
+        return [a for alts in self.expanded[view.pos + 1 : end] for a in alts]
 
 
 @dataclass
@@ -927,8 +972,8 @@ class _Check:
             self.unconfident = True
         bindings: dict[str, list[str]] = {}
         nested = list(scanned.nested)
-        for words in _simple_commands(tokens):
-            simple = self._simple(words, bindings)
+        for words, targets in _simple_commands(tokens):
+            simple = self._simple(words, bindings, targets)
             if literal_form:
                 self.literal_forms.add(len(self.simples))
             self.simples.append(simple)
@@ -939,7 +984,9 @@ class _Check:
         for k, inner in enumerate(nested):
             self.parse(inner, depth + 1, k in scanned.literal_nested)
 
-    def _simple(self, words: list[str], bindings: dict[str, list[str]]) -> _Simple:
+    def _simple(
+        self, words: list[str], bindings: dict[str, list[str]], targets: int = 0
+    ) -> _Simple:
         words = list(words)
         for _ in range(4):  # R19c(b): a literal in program position is WILD
             expanded = [self._expand(w, bindings) for w in words]
@@ -952,7 +999,7 @@ class _Check:
                 break
         else:
             expanded = [self._expand(w, bindings) for w in words]
-        simple = _Simple(words, expanded, [])
+        simple = _Simple(words, expanded, [], targets=targets)
         simple.views = _views(simple.first)
         for view in simple.views:
             if view.name in UNCONFIDENT_PROGRAMS:
@@ -1311,8 +1358,13 @@ class _Check:
         return self._recursion()  # rule 6
 
     def _unconfident_text(self) -> str:
-        """The raw text plus every expanded candidate (an R19 output can spell a name)."""
-        return "\n".join([self.folded, *(fold(c.text) for c in self.candidates)])
+        """The raw text, the raw text without quote characters (ruling R26: `p""hi`), that
+        without backslashes too (`p\\hi`, shell's third quoting mechanism), and every
+        expanded candidate (an R19 output can spell a name)."""
+        unquoted = self.folded.replace("'", "").replace('"', "")
+        unescaped = unquoted.replace("\\", "")
+        texts = [self.folded, unquoted, unescaped, *(fold(c.text) for c in self.candidates)]
+        return "\n".join(texts)
 
     def _textual(self) -> ProtectedRoot | None:
         """Rule 7: a root's spelling (configured, ~-expanded or canonical) in the raw text."""
@@ -1504,21 +1556,24 @@ class _Check:
         if any(_ANY_ASSIGN.search(word) for word in simple.marked):
             return False
         for words in (simple.marked, simple.first):
+            subcommand = -1  # the position of the subcommand view `git` starts
             for view in _views(words):
-                if view.name.startswith("git "):
-                    continue  # the subcommand view; checked with its `git` below
-                if view.name == "gh":
+                if view.pos == subcommand:
+                    continue  # checked with its `git` below (not a program named "git x")
+                word = words[view.pos]  # exactly git or gh: not ./git, bin/gh or GIT
+                if word == "gh":
                     sub = words[view.pos + 1] if view.pos + 1 < len(words) else ""
-                    if fold(sub) not in LITERAL_GH_SUBCOMMANDS:
-                        return False
-                elif view.name == "git":
+                    if sub not in LITERAL_GH_SUBCOMMANDS or "--" in words[view.pos + 1 :]:
+                        return False  # after a bare `--`, gh hands arguments to git
+                elif word == "git":
                     j = view.pos + 1
                     while j < len(words) and words[j].startswith("-"):
                         if words[j].startswith(LITERAL_GIT_UNSAFE):
                             return False
                         j += 2 if words[j] in GIT_VALUES else 1
-                    if j >= len(words) or fold(words[j]) not in LITERAL_GIT_SUBCOMMANDS:
+                    if j >= len(words) or words[j] not in LITERAL_GIT_SUBCOMMANDS:
                         return False
+                    subcommand = j
                 else:
                     return False
         return True

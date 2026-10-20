@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import secrets
+import subprocess
+import sys
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -340,11 +342,10 @@ def case_insensitive(directory: Path) -> bool:
 
 
 def test_true_case_rel(vault: Path) -> None:
-    insensitive = case_insensitive(vault)
-    expected = DONE_REL if insensitive else f"Experiments/{DONE}.md"
-    assert writes.vault_rel(vault, vault / f"Experiments/{DONE}.md") == expected
-    expected = "raw/papers/NEW/x" if insensitive else "RAW/papers/NEW/x"
-    assert writes.vault_rel(vault, vault / "RAW/papers/NEW/x") == expected
+    # Components are matched to directory entries by fold on every filesystem: the guard
+    # sees the existing folder however the path is cased.
+    assert writes.vault_rel(vault, vault / f"Experiments/{DONE}.md") == DONE_REL
+    assert writes.vault_rel(vault, vault / "RAW/papers/NEW/x") == "raw/papers/NEW/x"
     assert writes.vault_rel(vault, vault / "missing/Dir/x.md") == "missing/Dir/x.md"
     assert writes.vault_rel(vault, vault / f"{DONE_REL}/below") == f"{DONE_REL}/below"
 
@@ -363,19 +364,19 @@ def test_fold_classification() -> None:
 def test_miscased_paths_guarded(vault: Path) -> None:
     # Fold logic alone: these hold on any filesystem.
     denied(write_call(vault, "Manuscripts/x.md", "x\n"), "frozen-file", MANUSCRIPTS)
-    shown = writes.vault_rel(vault, vault / f"Experiments/{DONE}.md")
     denied(
         write_call(vault, f"Experiments/{DONE}.md", done_text(title="Changed")),
         "frozen-file",
-        frozen_message(shown, "experiment", "frozen field 'title' changed"),
+        frozen_message(DONE_REL, "experiment", "frozen field 'title' changed"),
     )
-
-
-@pytest.mark.skipif(
-    not case_insensitive(Path(__file__).parent), reason="needs a case-insensitive filesystem"
-)
-def test_miscased_paths_guarded_on_disk(vault: Path) -> None:
     denied(write_call(vault, "RAW/papers/a.txt", "x\n"), "frozen-file", RAW)
+
+
+def test_miscased_paths_guarded_on_disk(vault: Path) -> None:
+    # The Edit reads the mis-cased file, which exists only on a case-insensitive filesystem.
+    # Probe the vault's own (tmp) filesystem, not the repository's.
+    if not case_insensitive(vault):
+        pytest.skip("needs a case-insensitive filesystem")
     denied(
         edit_call(vault, f"EXPERIMENTS/{DONE}.md", "Done on", "Redone on"),
         "frozen-file",
@@ -579,3 +580,19 @@ def test_phi_multiedit_not_computable_scans_new_strings(vault: Path) -> None:
     denied(call(vault, "MultiEdit", tool_input), "phi", phi_message(CLAIM_REL, "phi-mrn", "2"))
     tool_input = {"file_path": str(vault / CLAIM_REL), "content": ["MRN", 12345678]}
     assert call(vault, "Write", tool_input) is None
+
+
+def test_unprotected_vault_write_does_not_import_phi(tmp_path: Path) -> None:
+    v = build_vault(tmp_path, MIN_CONFIG + "protected_data: false\n")
+    probe = (
+        "import sys\n"
+        "from labbrain.hooks.entry import run_hook\n"
+        "data = sys.stdin.buffer.read()\n"
+        f"code, out, err = run_hook('pre-tool-use', data, {{'HOME': {str(tmp_path)!r}}})\n"
+        "print(code, repr(err), 'labbrain.phi' in sys.modules)\n"
+    )
+    data = hook_payload("write", cwd=v, path=v / CLAIM_REL, content=f"MRN {mrn()}")
+    proc = subprocess.run(
+        [sys.executable, "-c", probe], input=data, capture_output=True, check=True
+    )
+    assert proc.stdout.decode().split() == ["0", "''", "False"]

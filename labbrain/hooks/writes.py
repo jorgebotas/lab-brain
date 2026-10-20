@@ -321,12 +321,12 @@ def _config(scope: Scope, vault: Path) -> Config:
 def _phi_denial(
     payload: Payload, scope: Scope, vault: Path, rel: str, proposed: _Proposed
 ) -> Denial | None:
+    config = _config(scope, vault)
+    if not config.protected_data:
+        return None  # labbrain.phi is never imported for an unprotected vault
     from labbrain.phi import ScanSettings, in_scan_scope, load_allowlist, scan_text
 
     if not in_scan_scope(rel):
-        return None
-    config = _config(scope, vault)
-    if not config.protected_data:
         return None
     text = proposed.get()
     if text is None:

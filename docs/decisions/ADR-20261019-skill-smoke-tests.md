@@ -39,6 +39,8 @@ Automatic skill invocation (`brain-core`, `handoff`) is checked only by the manu
 - All three smoke tests passed: `idea`, `exp-log --parent`, and `exp-log` without a protocol.
 - **A skill's own `allowed-tools` rule is honoured under `--permission-mode dontAsk`.** The engine calls ran with no permission denials, and the harness fails on any denial.
 
+- **M4 gate passed the same day.** `claude plugin marketplace add <repo>` and `claude plugin install lab-brain@lab-brain` installed version 0.2.0 at user scope. A fresh headless `/lab-brain:brief` session in a copy of the valid fixture then showed `lab-brain` in the `system/init` plugins, no `plugin_errors`, no permission denials, and the brief in the result. The plugin and marketplace were removed afterwards. This was done by hand, because `scripts/m4-gate.sh` needs `ANTHROPIC_API_KEY` for its isolated config directory.
+
 **Still unverified:**
 - whether `--bare` loads the plugin from `--plugin-dir` (that needs `ANTHROPIC_API_KEY`; login mode does not use `--bare`);
 - whether read-only `git` calls in the handoff skill are auto-allowed;

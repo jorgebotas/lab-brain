@@ -1032,7 +1032,11 @@ class _Check:
         return set()
 
     def _bind(self, words: list[str], simple: _Simple, bindings: dict[str, list[str]]) -> None:
-        """Record the variables this simple command assigns, for the commands after it."""
+        """Record the variables this simple command assigns, for the commands after it.
+
+        Redirection targets are not words of the command (R27a): `X+=hi 2>/dev/null` is
+        assignment-only, and binds, as bash does."""
+        words = words[: len(words) - simple.targets]
         assigns = [w for w in words if _ASSIGN.match(w)]
         first = simple.views[0].name if simple.views else ""
         if words and words[0] in ("for", "select") and len(words) > 1:

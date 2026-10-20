@@ -334,6 +334,10 @@ CASES: list[tuple[str, str, str]] = [
     ("env-split-claude", "env -S 'claude -p'", "deny"),
     ("guard-file-case", "cat brain/.LABBRAIN/config.yaml", "deny"),
     ("python-chdir", "python -c \"import os; os.chdir('../mnt'); open('phi/rows.csv')\"", "deny"),
+    # --- ruling R27(a): an assignment-only command with a redirection still binds
+    ("r27a-append-redirect", "X=../mnt/p; X+=hi 2>/dev/null; cat $X/rows.csv", "deny"),
+    ("r27a-redirect-first", "X=../mnt/p; >/dev/null X+=hi; cat $X/rows.csv", "deny"),
+    ("r27a-braced", "X=../mnt; X+=/p 2>/dev/null; cat ${{X}}hi/rows.csv", "deny"),
     # --- everyday commands that must keep working
     ("script", "python train.py --config configs/a.yaml", "allow"),
     ("ls-parent", "ls {tmp}/mnt", "allow"),
@@ -517,6 +521,18 @@ def test_gitignored_corpus(
 ) -> None:
     w = make_bash_world(tmp_path, monkeypatch, gitignored=True)
     assert _decision(w.check(command)) == expected, w.render(command)
+
+
+def test_r27_rows_from_a_clean_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The R27 rows from a cwd with no links into the root: the binding (or the wildcard)
+    denies them, not a link walk."""
+    w = make_bash_world(tmp_path, monkeypatch)
+    w.cwd = w.tmp / "work"
+    w.cwd.mkdir()
+    assert w.scope().protected
+    for case_id, command, expected in CASES:
+        if case_id.startswith("r27"):
+            assert _decision(w.check(command)) == expected, (case_id, w.render(command))
 
 
 def test_unprotected_scope_allows_all_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -458,3 +458,70 @@ def test_through_run_hook(world: World) -> None:
     assert world.sentinel not in err and "rows.csv" not in err
     stdin = hook_payload("read", cwd=world.vault, path=world.vault / "notes" / "n.md")
     assert run_hook("pre-tool-use", stdin, world.env) == (0, "", "")
+
+
+# --- Fix round 1 --------------------------------------------------------------------------
+
+
+def test_glob_non_ascii_root(world: World) -> None:
+    """Casefolding changes lengths (ß -> ss), so wildcards are matched raw as well as folded."""
+    straße = world.tmp / "straße"
+    write(straße, "rows.csv", f"{world.sentinel}\n")
+    (world.vault / ".labbrain" / "config.yaml").write_text(protected_config(straße))
+    entry = (1, str(straße))
+    for pattern in ("stra?e/*", "stra[ß]e/*", "straße/*", "STRASSE/*", "stras?e/*", "*ß*/*"):
+        denied(world, "Glob", {"pattern": pattern, "path": str(world.tmp)}, entry=entry)
+    allowed(world, "Glob", {"pattern": "stra?x/*", "path": str(world.tmp)})
+
+
+def test_mcp_cannot_touch_guard_files(world: World) -> None:
+    config = world.vault / ".labbrain" / "config.yaml"
+    for args in (
+        {"path": str(config), "content": "protected_data: false"},
+        {"path": ".claude/settings.json", "content": "{}"},
+        {"path": ".labbrain/phi-allow.yaml"},
+        {"cmd": f"cp x {world.plugin}/labbrain/hooks/guard.py"},  # embedded, under the plugin
+    ):
+        denied(world, "mcp__fs__write_file", args, rule="guard-config")
+    denied(world, "mcp__fs__read_file", {"path": str(config)}, rule="guard-config")  # accepted
+    allowed(world, "mcp__fs__write_file", {"path": "notes/new.md", "content": "x"})
+
+
+def test_mcp_embedded_relative_path_denied(world: World) -> None:
+    (world.vault / "linked").symlink_to(world.phi, target_is_directory=True)
+    for sql in (
+        "SELECT * FROM '../phi/rows.csv'",
+        "SELECT * FROM 'linked/rows.csv'",
+        'SELECT * FROM read_csv("notes/../../phi/rows.csv")',
+        "COPY t TO `linked/out.csv`;",
+    ):
+        denied(world, "mcp__duckdb__query", {"sql": sql})
+    allowed(world, "mcp__duckdb__query", {"sql": "SELECT 1.5 FROM 'notes/n.md' -- e.g. ok"})
+    assert guard.PATHLIKE.findall("a '../phi/x' b=~/y c(./z)") == ["../phi/x", "~/y", "./z"]
+
+
+def test_mcp_over_length_path_denied(world: World) -> None:
+    (world.vault / "linked").symlink_to(world.phi, target_is_directory=True)
+    for path in ("./" * 3000 + "../phi/rows.csv", "./" * 3000 + "linked/rows.csv"):
+        denied(world, "mcp__fs__read", {"path": path})
+        denied(world, "mcp__db__q", {"sql": f"SELECT * FROM '{path}'"})  # embedded too
+    # Still over the cap once normalised, and path-like: unsure.
+    denied(world, "mcp__fs__read", {"path": "/".join(["d" * 200] * 30)})
+    allowed(world, "mcp__fs__read", {"text": "word " * 2000})  # long, but nothing path-like
+    allowed(world, "mcp__fs__read", {"path": "./" * 3000 + "notes/n.md"})
+    # Too many distinct path-like substrings to check in one call: unsure.
+    denied(world, "mcp__fs__read", {"text": " ".join(f"a{i}.md" for i in range(6000))})
+    allowed(world, "mcp__fs__read", {"text": " ".join(f"a{i}.md" for i in range(1000))})
+
+
+def test_glob_home_from_hook_env(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    """R1: `~` in a Glob pattern is the hook environment's HOME, not the process's."""
+    elsewhere = world.tmp / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.setenv("HOME", str(elsewhere))
+    home_phi = world.home / "phi"
+    (world.vault / ".labbrain" / "config.yaml").write_text(protected_config(home_phi))
+    entry = (1, str(home_phi))
+    denied(world, "Glob", {"pattern": "~/phi/*.csv"}, entry=entry)
+    denied(world, "Glob", {"pattern": "~/*/*.csv"}, entry=entry)
+    allowed(world, "Glob", {"pattern": "~/notes/*.md"})

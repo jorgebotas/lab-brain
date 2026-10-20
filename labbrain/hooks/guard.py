@@ -10,8 +10,9 @@ Messages never quote a candidate path, a file name or file contents.
 from __future__ import annotations
 
 import os
+import pwd
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,13 @@ GLOB_UNMODELLED = ("**", "{", "(", "\\")
 MAX_DEPTH = 20  # containers nested deeper than this in tool_input are not walked: deny
 MAX_STRINGS = 2000  # more strings than this in tool_input: deny
 MAX_STRING = 4096  # a path candidate is at most this long; the textual net sees it all
+MAX_CANDIDATES = 5000  # more distinct path candidates than this in one call: deny
+
+# Path-like substrings (Bash rule 1): runs containing `/`, `~` or `.`. Task 6 unifies this with
+# bash.py. `findall` on it is quadratic on long runs without a delimiter, so the walk splits
+# on `_DELIMITERS` and `fullmatch`es each token instead, which yields the same substrings.
+PATHLIKE = re.compile(r"""[^\s'"`()<>;|&=,]*[/~.][^\s'"`()<>;|&=,]*""")
+_DELIMITERS = re.compile(r"""[\s'"`()<>;|&=,]+""")
 
 # A tool name goes into the message: anything outside this set is replaced, length capped.
 _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9_.:-]+")
@@ -176,11 +184,7 @@ def _glob(args: dict[str, Any], cwd: Path, scope: Scope, subject: str) -> Denial
     pattern = args.get("pattern")
     if not isinstance(pattern, str):
         raise _Unsure
-    if pattern.startswith("~"):  # taken as the home it names, as canonical() would
-        try:
-            pattern = str(Path(pattern).expanduser())
-        except RuntimeError:
-            raise _Unsure from None
+    pattern = _expand_home(pattern, scope.env)
     parts = (_start(args, cwd) / pattern).parts
     cut = next((i for i, part in enumerate(parts) if GLOB_SPECIAL & set(part)), len(parts))
     prefix = _canon(str(Path(*parts[:cut])), cwd)
@@ -201,23 +205,39 @@ def _may_reach(rest: tuple[str, ...], prefix: Path, root: ProtectedRoot) -> bool
     text = "/".join(rest)
     if any(token in text for token in GLOB_UNMODELLED):
         return True
-    relative = fold(root.path)[len(fold(prefix).rstrip(os.sep)) :].strip(os.sep).split(os.sep)
-    if len(rest) < len(relative):
+    # `under` matched folded spellings, and folding keeps separators, so the root's first
+    # components are the prefix's.
+    names = root.path.parts[len(prefix.parts) :]
+    if len(rest) < len(names):
         return False  # every match lies above the root
-    return all(fnmatchcase(name, fold(part)) for name, part in zip(relative, rest, strict=False))
+    # Raw and folded: folding can change a name's length (ß -> ss), which breaks `?` and `[]`.
+    return all(
+        fnmatchcase(name, part) or fnmatchcase(fold(name), fold(part))
+        for name, part in zip(names, rest, strict=False)
+    )
+
+
+def _expand_home(text: str, env: Mapping[str, str]) -> str:
+    """`text` with a leading `~` expanded from the hook's HOME (R1), or `~user` from the user
+    database; unknown users are unsure."""
+    if not text.startswith("~"):
+        return text
+    head, sep, tail = text.partition(os.sep)
+    try:
+        if head == "~":
+            home = env.get("HOME") or pwd.getpwuid(os.getuid()).pw_dir
+        else:
+            home = pwd.getpwnam(head[1:]).pw_dir
+    except KeyError:
+        raise _Unsure from None
+    return home + sep + tail
 
 
 def _spellings(root: ProtectedRoot, scope: Scope) -> set[str]:
     """The folded spellings of `root` the textual net looks for: configured, `~`-expanded
     (with the hook's HOME, or the user database for `~user`) and canonical."""
     configured = root.configured.strip()
-    found = {configured, str(root.path)}
-    if configured == "~" or configured.startswith("~/"):
-        home = scope.env.get("HOME")
-        if home:
-            found.add(home + configured[1:])
-    elif configured.startswith("~"):
-        found.add(os.path.expanduser(configured))  # `~user`: the user database, not HOME
+    found = {configured, str(root.path), _expand_home(configured, scope.env)}
     return {fold(s.rstrip(os.sep) or s) for s in found if s}
 
 
@@ -255,13 +275,41 @@ def _strings(tool_input: dict[str, Any]) -> list[str]:
     return found
 
 
+def _paths(text: str, cwd: Path, env: Mapping[str, str]) -> list[Path]:
+    """The canonical paths candidate `text` may name.
+
+    A candidate over the cap is checked truncated and, normalised in full, as joined to cwd
+    (so `./` padding cannot push a path past the cap); still over the cap and containing a
+    `/`, it is unsure.
+    """
+    paths = [_canon(text[:MAX_STRING], cwd)]
+    if len(text) > MAX_STRING:
+        full = os.path.normpath(os.path.join(str(cwd), _expand_home(text, env)))
+        if len(full) <= MAX_STRING:
+            paths.append(_canon(full, cwd))
+        elif "/" in text:
+            raise _Unsure
+    return paths
+
+
 def _any_tool(args: dict[str, Any], cwd: Path, scope: Scope, subject: str) -> Denial | None:
-    """Every string is a path candidate and is searched for a root's spelling."""
+    """Every string, and every path-like substring of one, is a path candidate; every string
+    is searched for a root's spelling. A candidate that is a guard file denies (R11)."""
     spellings = _all_spellings(scope)
+    candidates: set[str] = set()
     for text in _strings(args):
         root = _named(text, spellings)
-        if root is None:
-            root = scope.targets.containing(_canon(text[:MAX_STRING], cwd))
         if root is not None:
             return data_denial(root, subject)
+        candidates.add(text)
+        candidates.update(t for t in _DELIMITERS.split(text) if PATHLIKE.fullmatch(t))
+        if len(candidates) > MAX_CANDIDATES:
+            raise _Unsure
+    paths = [path for text in candidates for path in _paths(text, cwd, scope.env)]
+    for path in paths:
+        root = scope.targets.containing(path)
+        if root is not None:
+            return data_denial(root, subject)
+    if any(scope.targets.is_guard_file(path) for path in paths):
+        return Denial("guard-config", GUARD_CONFIG_MESSAGE)
     return None

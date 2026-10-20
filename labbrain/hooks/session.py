@@ -17,7 +17,7 @@ CONFIG_ERROR = (
     "lab-brain: vault config error; ask the user to fix .labbrain/config.yaml "
     "(`labbrain lint` shows the problem)\n"
 )
-INDEX_FAILED = "index.md could not be regenerated\n"
+INDEX_FAILED = " · index.md not regenerated"  # appended to the counts line: still <= 4 lines
 
 
 def session_start(payload: Payload, env: Mapping[str, str]) -> tuple[int, str, str]:
@@ -42,4 +42,6 @@ def session_start(payload: Payload, env: Mapping[str, str]) -> tuple[int, str, s
     except Exception:
         index_ok = False
     text = build_brief(vault, lint.run(vault), short=True, warning=version_warning(config))
-    return 0, text if index_ok else text + INDEX_FAILED, ""
+    if not index_ok:
+        text = text.removesuffix("\n") + INDEX_FAILED + "\n"
+    return 0, text, ""

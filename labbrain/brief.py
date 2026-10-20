@@ -1,12 +1,14 @@
 """`labbrain brief`: recent handoffs, open work and vault health in a few lines.
 
-Prints note IDs and titles (what index.md already holds), never body text.
+Prints note IDs and titles (what index.md already holds), never body text. Titles pass
+through `findings.sanitize`, so PHI-shaped text in a title (digit runs, SSNs, phone numbers,
+emails) is redacted: the brief also feeds the SessionStart hook's session context.
 """
 
 from __future__ import annotations
 
 from labbrain import __version__
-from labbrain.findings import ERROR, WARNING, Finding, strip_controls
+from labbrain.findings import ERROR, WARNING, Finding, sanitize, strip_controls
 from labbrain.notes import Note
 from labbrain.vault import Vault
 
@@ -19,7 +21,7 @@ def _clean(text: str) -> str:
 
 
 def _title(note: Note) -> str:
-    return _clean(note.get_str("title") or "")
+    return sanitize(note.get_str("title") or "")
 
 
 def _row(note: Note) -> str:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 import time
 from pathlib import Path
 
@@ -73,8 +74,56 @@ def test_index_failure_still_prints_brief(tmp_path: Path, monkeypatch: pytest.Mo
     code, out, err = session_start(payload(root), {})
     assert (code, err) == (0, "")
     assert out.startswith("Toy · engine ")
-    assert out.endswith("\nindex.md could not be regenerated\n")
+    assert out.splitlines()[-1].endswith("Lint errors 0 · index.md not regenerated")
     assert "SECRET" not in out
+
+
+def test_index_failure_with_version_warning_stays_four_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = toy_vault(tmp_path / "v", MIN_CONFIG + "engine_min_version: 99.0.0\n")
+
+    def fail(_: Vault) -> bool:
+        raise OSError("SECRET")
+
+    monkeypatch.setattr(index, "write", fail)
+    code, out, _ = session_start(payload(root), {})
+    lines = out.splitlines()
+    assert code == 0
+    assert len(lines) == 4
+    assert lines[1].startswith("warning: ")
+    assert lines[-1].endswith(" · index.md not regenerated")
+    assert out.endswith("\n")
+
+
+def handoff_vault(root: Path, title: str) -> Path:
+    toy_vault(root)
+    hid = "HO-20261014-1420-claude"
+    write(root, f"handoffs/{hid}.md", note_text(hid, "handoff", title=title))
+    return root
+
+
+def test_handoff_title_digits_redacted(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from labbrain.cli import main
+
+    digits = str(secrets.randbelow(90_000_000) + 10_000_000)
+    root = handoff_vault(tmp_path / "v", f"Patient {digits}")
+    code, out, _ = session_start(payload(root), {})
+    assert code == 0
+    assert "Last handoff: HO-20261014-1420-claude  Patient" in out
+    assert digits not in out
+    capsys.readouterr()
+    for argv in (["brief", "--short"], ["brief"]):
+        assert main(["--vault", str(root), *argv]) == 0
+        cli_out = capsys.readouterr().out
+        assert "HO-20261014-1420-claude  Patient" in cli_out
+        assert digits not in cli_out, argv
+
+
+def test_plain_handoff_title_shown(tmp_path: Path) -> None:
+    root = handoff_vault(tmp_path / "v", "Registered the headline AUROC claim")
+    _, out, _ = session_start(payload(root), {})
+    assert "Last handoff: HO-20261014-1420-claude  Registered the headline AUROC claim\n" in out
 
 
 def test_subfolder_env_relative_vault(tmp_path: Path) -> None:

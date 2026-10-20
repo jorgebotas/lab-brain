@@ -44,6 +44,8 @@ PATH_KEYS = ("file_path", "notebook_path", "path")
 # A Glob component with any of these is a wildcard (R20): the literal directories before it
 # are where the search may start. A component starting with `!`, or any `\\`, denies.
 GLOB_SPECIAL = frozenset("*?[]{}!\\")
+# Claude Code's own cut (GKo): its search starts at the last `/` before the first of these.
+GKO_SPECIAL = frozenset("*?[{")
 MAX_GLOB_NAMES = 64  # more literal leading directories than this in a Glob pattern: deny
 
 MAX_DEPTH = 20  # containers nested deeper than this in tool_input are not walked: deny
@@ -100,16 +102,16 @@ def _reads_broken_config(payload: Payload, broken: Iterable[VaultInfo]) -> bool:
     """Whether this is a Read of a file inside a broken vault's own `.labbrain/`.
 
     The directory is not resolved: when `.labbrain` is itself a link, no resolved path lies
-    below it, so nothing is allowed.
+    below it, so nothing is allowed. Both readings (R22) must lie below it.
     """
     value = payload.tool_input.get("file_path")
     if payload.tool_name != "Read" or not isinstance(value, str):
         return False
     try:
-        path = canonical(value, payload.cwd)
-    except (ValueError, RuntimeError, OSError):
+        paths = _readings(value, payload.cwd)
+    except _Unsure:
         return False
-    return any(v.root / ".labbrain" in path.parents for v in broken)
+    return all(any(v.root / ".labbrain" in path.parents for v in broken) for path in paths)
 
 
 def _canon(value: object, base: Path) -> Path:
@@ -122,11 +124,36 @@ def _canon(value: object, base: Path) -> Path:
         raise _Unsure from None
 
 
+def _readings(value: object, base: Path) -> list[Path]:
+    """The paths `value`, joined to `base` when relative, may name (R22).
+
+    The physical reading resolves each link before climbing a `..`, as the system does. The
+    textual reading collapses `..` first, as Claude Code's Node `path.resolve` does, and is
+    then canonicalised. The textual reading is only ever an extra check, never a substitute.
+    """
+    physical = _canon(value, base)
+    assert isinstance(value, str)  # _canon is unsure of anything else
+    joined = os.path.join(str(base), os.path.expanduser(value))
+    textual = _canon(os.path.normpath(joined), base)
+    return [physical] if textual == physical else [physical, textual]
+
+
+def _reach(paths: Iterable[Path], scope: Scope) -> ProtectedRoot | None:
+    """The root one of `paths` lies inside, or that a recursive walk from one reaches."""
+    for path in paths:
+        root = scope.targets.containing(path)
+        below = scope.targets.under(path)
+        if root is not None or below:
+            return root or below[0]
+    return None
+
+
 def _check(payload: Payload, scope: Scope, subject: str) -> Denial | None:
     cwd = payload.cwd
-    root = scope.targets.containing(_canon(str(cwd), cwd))
-    if root is not None:
-        return data_denial(root, CWD_SUBJECT)
+    for path in _readings(str(cwd), cwd):
+        root = scope.targets.containing(path)
+        if root is not None:
+            return data_denial(root, CWD_SUBJECT)
     tool, args = payload.tool_name, payload.tool_input
     if tool in FILE_TOOLS:
         return _file_tool(tool, args, cwd, scope, subject)
@@ -149,7 +176,7 @@ def _check(payload: Payload, scope: Scope, subject: str) -> Denial | None:
 def _file_tool(
     tool: str, args: dict[str, Any], cwd: Path, scope: Scope, subject: str
 ) -> Denial | None:
-    paths = [_canon(args[key], cwd) for key in PATH_KEYS if args.get(key) is not None]
+    paths = [p for key in PATH_KEYS if args.get(key) is not None for p in _readings(args[key], cwd)]
     for path in paths:
         root = scope.targets.containing(path)
         if root is not None:
@@ -159,18 +186,16 @@ def _file_tool(
     return None
 
 
-def _start(args: dict[str, Any], cwd: Path) -> Path:
-    """The canonical directory a Grep or Glob call starts from (`path`, default cwd)."""
+def _start(args: dict[str, Any], cwd: Path) -> list[Path]:
+    """The readings of the directory a Grep or Glob call starts from (`path`, default cwd)."""
     value = args.get("path")
-    return _canon(str(cwd) if value is None or value == "" else value, cwd)
+    return _readings(str(cwd) if value is None or value == "" else value, cwd)
 
 
 def _grep(args: dict[str, Any], cwd: Path, scope: Scope, subject: str) -> Denial | None:
-    start = _start(args, cwd)
-    root = scope.targets.containing(start)
-    below = scope.targets.under(start)  # treated as rg: a recursive search enters them
-    if root is not None or below:
-        return data_denial(root or below[0], subject)
+    root = _reach(_start(args, cwd), scope)  # treated as rg: a recursive search enters roots
+    if root is not None:
+        return data_denial(root, subject)
     glob = args.get("glob")
     if glob is not None:
         if not isinstance(glob, str):
@@ -191,39 +216,47 @@ def _glob(args: dict[str, Any], cwd: Path, scope: Scope, subject: str) -> Denial
     pattern = args.get("pattern")
     if not isinstance(pattern, str):
         raise _Unsure
-    for base in _glob_bases(pattern, _start(args, cwd), scope.env):
-        start = _canon(str(base), cwd)
-        root = scope.targets.containing(start)
-        below = scope.targets.under(start)
-        if root is not None or below:
-            return data_denial(root or below[0], subject)
-    return None
+    bases = _glob_bases(pattern, _start(args, cwd), scope.env)
+    root = _reach((path for base in bases for path in _readings(str(base), cwd)), scope)
+    return None if root is None else data_denial(root, subject)
 
 
-def _glob_bases(pattern: str, start: Path, env: Mapping[str, str]) -> list[Path]:
-    """Every directory a Glob of `pattern` from `start` may search from.
+def _glob_bases(pattern: str, starts: list[Path], env: Mapping[str, str]) -> list[Path]:
+    """Every directory a Glob of `pattern` from `starts` (the readings of `path`) may search.
 
-    `start` itself and, for an absolute or `~` pattern, where Claude Code starts ripgrep (R21):
-    the deepest literal directory before the first wildcard component, or for a fully
-    literal pattern its parent and the path itself. Each run of the pattern's literal leading
-    directories is also joined to every such base (the pattern read relative, `/`-anchored,
-    or with leading components that repeat the end of `path` stripped).
+    `starts` and, for an absolute or `~` pattern, where Claude Code starts ripgrep (R21): the
+    deepest literal directory before the first wildcard component, or for a fully literal
+    pattern its parent and the path itself. That is taken at the guard's cut and at Claude
+    Code's narrower GKo cut (R22). Each run of the pattern's literal leading directories is
+    also joined to every such base (the pattern read relative, `/`-anchored, or with leading
+    components that repeat the end of `path` stripped).
     """
     parts = pattern.split(os.sep)
     if "\\" in pattern or any(part.startswith("!") for part in parts):
         raise _Unsure
-    cut = next((i for i, part in enumerate(parts) if GLOB_SPECIAL & set(part)), len(parts))
-    if ".." in parts[cut:]:  # a wildcard followed by `..` can climb anywhere
+    cuts = [_cut(parts, GLOB_SPECIAL), _cut(parts, GKO_SPECIAL)]
+    if ".." in parts[cuts[0] :]:  # a wildcard followed by `..` can climb anywhere
         raise _Unsure
-    names = [part for part in parts[:cut] if part not in ("", ".")]
+    names = [part for part in parts[: cuts[1]] if part not in ("", ".")]
     if len(names) > MAX_GLOB_NAMES:
         raise _Unsure
-    anchors = [start]
-    if pattern.startswith((os.sep, "~")) and cut > 0:
-        prefix = Path(_expand_home(os.sep.join(parts[:cut]) or os.sep, env))
-        anchors += [prefix.parent, prefix] if cut == len(parts) else [prefix]
+    anchors = list(starts)
+    if pattern.startswith((os.sep, "~")):
+        for cut in cuts:
+            prefix = Path(_expand_home(os.sep.join(parts[:cut]) or os.sep, env))
+            anchors += [prefix.parent, prefix] if cut == len(parts) else [prefix]
     runs = [names[i:j] for i in range(len(names)) for j in range(i + 1, len(names) + 1)]
-    return anchors + [anchor.joinpath(*run) for anchor in anchors for run in runs]
+    bases = {str(anchor): anchor for anchor in anchors}
+    for anchor in anchors:
+        for run in runs:
+            base = anchor.joinpath(*run)
+            bases.setdefault(str(base), base)
+    return list(bases.values())
+
+
+def _cut(parts: list[str], special: frozenset[str]) -> int:
+    """The index of the first component of `parts` holding a character in `special`."""
+    return next((i for i, part in enumerate(parts) if special & set(part)), len(parts))
 
 
 def _expand_home(text: str, env: Mapping[str, str]) -> str:
@@ -293,7 +326,7 @@ def _paths(text: str, cwd: Path, env: Mapping[str, str]) -> list[Path]:
     a long candidate with a `..` component, or still over the cap, is unsure. A long single
     component, with no separator, cannot name a file and needs nothing more.
     """
-    paths = [_canon(text[:MAX_STRING], cwd)]
+    paths = _readings(text[:MAX_STRING], cwd)
     if len(text) > MAX_STRING:
         expanded = _expand_home(text, env)
         if os.sep not in expanded:
@@ -302,7 +335,7 @@ def _paths(text: str, cwd: Path, env: Mapping[str, str]) -> list[Path]:
         compact = os.sep + os.sep.join(parts)
         if ".." in parts or len(compact) > MAX_STRING:
             raise _Unsure
-        paths.append(_canon(compact, cwd))
+        paths += _readings(compact, cwd)
     return paths
 
 

@@ -634,3 +634,61 @@ def test_glob_home_from_hook_env(world: World, monkeypatch: pytest.MonkeyPatch) 
     allowed(world, "Glob", {"pattern": "~/notes/*.md"})  # R21: the base is ~/notes
     allowed(world, "Glob", {"pattern": "~/code/*.py"})
     allowed(world, "Glob", {"pattern": "*.md", "path": str(world.home / "notes")})
+
+
+# --- Fix round 5 --------------------------------------------------------------------------
+
+
+def test_glob_gko_base_link(world: World) -> None:
+    """Claude Code cuts only at `*?[{` (GKo), so its base can be deeper than the guard's cut."""
+    for name in ("l]", "l}", "l!x"):
+        (world.vault / name).symlink_to(world.phi, target_is_directory=True)
+    for pattern in ("l]/*", "l]/*.csv", "l}/*", "l!x/*"):
+        denied(world, "Glob", {"pattern": f"{world.vault}/{pattern}"}, cwd=world.vault / "notes")
+
+
+def test_textual_and_physical_readings(world: World) -> None:
+    """R22: `..` is judged both after resolving links (the system) and collapsed as text
+    (Claude Code's Node `path.resolve`); either reading reaching a root denies."""
+    tmp, notes = world.tmp, world.vault / "notes"
+    deep = tmp / "out" / "a" / "b" / "c"
+    deep.mkdir(parents=True)
+    (tmp / "lnk").symlink_to(deep, target_is_directory=True)  # `lnk/..` is out/a/b physically
+    for args in (
+        {"pattern": f"{tmp}/lnk/../**/*.csv"},
+        {"pattern": f"{tmp}/lnk/../d*"},
+        {"pattern": f"{tmp}/lnk/../rows.csv"},
+        {"pattern": "**/*.csv", "path": f"{tmp}/lnk/.."},
+    ):
+        denied(world, "Glob", args, cwd=notes)
+    denied(world, "Grep", {"pattern": "x", "path": f"{tmp}/lnk/.."})
+    # `lnk2/..` is the vault physically, so only the textual reading is the data file.
+    (tmp / "lnk2").symlink_to(notes, target_is_directory=True)
+    sneaky = f"{tmp}/lnk2/../phi/rows.csv"
+    assert guard.canonical(sneaky) == world.vault / "phi" / "rows.csv"
+    denied(world, "Read", {"file_path": sneaky})
+    denied(world, "Read", {"file_path": "../../lnk2/../phi/rows.csv"}, cwd=notes)
+    denied(world, "LS", {"path": f"{tmp}/lnk2/../phi"})
+    denied(world, "mcp__fs__read", {"path": sneaky})
+    denied(world, "mcp__db__q", {"sql": "SELECT * FROM '../lnk2/../phi/rows.csv'"})
+    allowed(world, "Read", {"file_path": f"{tmp}/lnk2/../vault/notes/n.md"})
+
+
+def test_system_link_readings(world: World) -> None:
+    """On macOS `/tmp` and `/var` are links into `/private`: `/var/../private/var/x` is
+    `/private/private/var/x` physically, but Claude Code searches `/private/var/x`."""
+    real = str(world.tmp.resolve())
+    top = next(
+        (
+            t
+            for t in ("tmp", "var")
+            if Path(f"/{t}").is_symlink() and real.startswith(f"/private/{t}/")
+        ),
+        None,
+    )
+    if top is None:
+        pytest.skip("no /tmp or /var link into /private here")
+    spelled = f"/{top}/../private{real.removeprefix('/private')}"
+    denied(world, "Glob", {"pattern": f"{spelled}/d*"})
+    denied(world, "Glob", {"pattern": f"{spelled}/phi/rows.csv"})
+    denied(world, "Read", {"file_path": f"{spelled}/phi/rows.csv"})

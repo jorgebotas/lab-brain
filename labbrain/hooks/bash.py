@@ -299,15 +299,15 @@ _SEPARATORS = set(";|()&\n")
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _ASSIGN = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)(\+?)=")
 _SPECIAL = set("?#$!@*-0123456789")
-# Ruling R19: a substitution whose output is literal text (`cat <<EOF`, `echo word`) is
-# marked _VAR _LOCAL k _END by the pre-pass, renumbered _VAR _LIT k _END by _Check.parse.
+# Ruling R19b: a whole-word `"$(cat <<'EOF' … EOF)"` stands for its literal heredoc body;
+# the pre-pass marks it _VAR _LOCAL k _END, which _Check.parse renumbers _VAR _LIT k _END.
 _LOCAL = "\ue004"
 _LIT = "\ue003"
 _LOCAL_REF = re.compile(f"{_VAR}{_LOCAL}([0-9]+){_END}")
 _MARKER = re.compile(f"({_VAR}[A-Za-z0-9_{_LIT}]*{_END})")
-LITERAL_PROGRAMS: frozenset[str] = frozenset({"echo", "printf"})
-_PRINTF_CONVERSION = re.compile(r"%%|%[-+ #0-9.]*[a-zA-Z]")
-_ECHO_ESCAPES = re.compile(r"-[neE]*[eE][neE]*")  # echo flags that switch escapes on or off
+# R19b: the only literal form, `"$(cat <<'EOF'` (or <<"EOF") as a whole word.
+_QUOTED_HEREDOC = re.compile(r"cat[ \t]+<<[ \t]*(['\"])([A-Za-z_][A-Za-z0-9_]*)\1[ \t]*\n")
+_WORD_BOUNDARY = set(" \t\n;&|()<>")
 # Raw-text runs are split at these characters, never matched with a backtracking regex
 # (that is quadratic on long undelimited text); a run is a candidate when it holds / ~ or .
 _RAW_DELIMITERS = re.compile(r"[\s'\"`()<>;|&=,]+")
@@ -377,79 +377,30 @@ def _matching_brace(text: str, i: int) -> int:
     return -1
 
 
-def _printf(args: Sequence[str]) -> str:
-    """What `printf FORMAT ARGS…` prints, closely enough: conversions take the arguments in
-    turn and the format repeats while arguments remain."""
-    if not args:
-        return ""
-    fmt, rest = args[0], list(args[1:])
-    out: list[str] = []
-    for _ in range(MAX_ALTERNATIVES):
-        used = 0
-        last = 0
-        for match in _PRINTF_CONVERSION.finditer(fmt):
-            out.append(fmt[last : match.start()])
-            last = match.end()
-            if match.group() == "%%":
-                out.append("%")
-                continue
-            out.append(rest[used] if used < len(rest) else "")
-            used += 1
-        out.append(fmt[last:])
-        rest = rest[used:]
-        if not rest or not used:
-            break
-    return "".join(out)
+def _heredoc_literal(inner: str) -> list[str] | None:
+    """Ruling R19b: the readings of a substitution that is exactly `cat` fed by one heredoc
+    with a quoted delimiter (not `<<-`, not a herestring) and nothing else; else None.
+
+    The readings are the body and the body without its trailing newlines (what the
+    substitution yields)."""
+    match = _QUOTED_HEREDOC.match(inner)
+    if match is None:
+        return None
+    lines = inner[match.end() :].split("\n")
+    if match.group(2) not in lines:
+        return None
+    k = lines.index(match.group(2))
+    if "\n".join(lines[k + 1 :]).strip("\n"):
+        return None  # something follows the heredoc
+    body = "".join(line + "\n" for line in lines[:k])
+    return list(dict.fromkeys([body, body.rstrip("\n")]))
 
 
-def _literal_output(inner: str) -> list[str] | None:
-    """Ruling R19: the output of a substitution's command when it is literal text, else None.
-
-    Only `cat` fed by nothing but one heredoc or herestring, and `echo`/`printf` with
-    literal words (no variables, globs, substitutions or redirections), qualify.
-    """
-    if len(inner) > LEX_LIMIT:
-        return None
-    scanned = _scan(inner)
-    pieces = [scanned.marked, *scanned.literal]
-    if not scanned.ok or scanned.nested or any(_VAR in p or WILD in p for p in pieces):
-        return None
-    try:
-        tokens = _shlex(scanned.marked)
-    except ValueError:
-        return None
-    while tokens and set(tokens[0]) <= {"\n"}:
-        tokens.pop(0)
-    while tokens and set(tokens[-1]) <= {"\n"}:
-        tokens.pop()
-    if not tokens:
-        return None
-    program, args = tokens[0], tokens[1:]
-    if program == "cat":
-        if len(args) == 2 and args[0] == "<<" and len(scanned.literal) == 1:
-            return [scanned.literal[0]]  # a heredoc: its body (the delimiter is args[1])
-        if len(args) == 2 and args[0] == "<<<" and not scanned.literal:
-            return [args[1]]
-        return None
-    if program in LITERAL_PROGRAMS and not scanned.literal:
-        if any(_is_operator(a) or not _GLOB_CHARS.isdisjoint(a) for a in args):
-            return None
-        if any("\\" in a for a in args):  # R19a: escapes (zsh's echo expands them too)
-            return None
-        if program == "echo":
-            if any(_ECHO_ESCAPES.fullmatch(a) for a in args):
-                return None  # R19a: echo -e / -E
-            return [" ".join(args)]
-        if args and any(c not in ("%s", "%%") for c in _PRINTF_CONVERSION.findall(args[0])):
-            return None  # R19a: only %s and %% are literal
-        return list(dict.fromkeys([_printf(args), " ".join(args), "".join(args[1:])]))
-    return None
-
-
-def _substitution(inner: str, out: list[str], scanned: _Scanned) -> None:
-    """Record a substitution: its command for analysis, and a marker for its output."""
+def _substitution(inner: str, out: list[str], scanned: _Scanned, whole: bool) -> None:
+    """Record a substitution: its command for analysis, and a marker for its output, which
+    is WILD unless `whole` (the word is exactly `"$(…)"`) and the command is R19b's form."""
     scanned.nested.append(inner)
-    literal = _literal_output(inner)
+    literal = _heredoc_literal(inner) if whole else None
     if literal is None:
         out.append(WILD)
     else:
@@ -457,8 +408,12 @@ def _substitution(inner: str, out: list[str], scanned: _Scanned) -> None:
         scanned.literals.append(literal)
 
 
-def _expansion(text: str, i: int, out: list[str], scanned: _Scanned) -> tuple[int, bool]:
-    """Mark the `$…` or backtick expansion at `text[i]`; (index after it, closed)."""
+def _expansion(
+    text: str, i: int, out: list[str], scanned: _Scanned, quoted_start: bool = False
+) -> tuple[int, bool]:
+    """Mark the `$…` or backtick expansion at `text[i]`; (index after it, closed).
+
+    `quoted_start`: a double quote opened right before `text[i]`, at the start of a word."""
     nested = scanned.nested
     n = len(text)
     if text[i] == "`":
@@ -466,7 +421,7 @@ def _expansion(text: str, i: int, out: list[str], scanned: _Scanned) -> tuple[in
         while j < n and text[j] != "`":
             j += 2 if text[j] == "\\" else 1
         if j < n:
-            _substitution(text[i + 1 : j].replace("\\`", "`"), out, scanned)
+            _substitution(text[i + 1 : j].replace("\\`", "`"), out, scanned, False)
         else:
             nested.append(text[i + 1 :])
             out.append(WILD)
@@ -475,7 +430,13 @@ def _expansion(text: str, i: int, out: list[str], scanned: _Scanned) -> tuple[in
     if nxt == "(":
         inner = _scan(text, i + 2, ")")
         if inner.ok:
-            _substitution(text[i + 2 : inner.end], out, scanned)
+            after = inner.end + 1  # the closing quote, then a word boundary, must follow
+            whole = (
+                quoted_start
+                and text[after : after + 1] == '"'
+                and (after + 1 == n or text[after + 1] in _WORD_BOUNDARY)
+            )
+            _substitution(text[i + 2 : inner.end], out, scanned, whole)
         else:
             nested.append(text[i + 2 : inner.end])
             out.append(WILD)
@@ -495,6 +456,8 @@ def _expansion(text: str, i: int, out: list[str], scanned: _Scanned) -> tuple[in
             out.append(WILD)
             nested.append(content)
         return j + 1, True
+    if nxt == '"':  # $"…" (locale quoting): the double-quoted string that follows
+        return i + 1, True
     if nxt == "'":  # $'…' (ANSI-C quoting): escapes could spell anything
         j = i + 2
         while j < n and text[j] != "'":
@@ -602,6 +565,8 @@ def _scan(text: str, i: int = 0, closer: str | None = None) -> _Scanned:
             i = j
         elif c == '"':
             out.append('"')
+            opened = i + 1
+            at_word_start = i == 0 or text[i - 1] in _WORD_BOUNDARY
             i += 1
             while i < n and text[i] != '"':
                 stop = _DQUOTE_STOP.search(text, i)
@@ -618,7 +583,7 @@ def _scan(text: str, i: int = 0, closer: str | None = None) -> _Scanned:
                     out.append(text[i : i + 2])
                     i += 2
                 elif d == "`" or (d == "$" and text[i + 1 : i + 2] != '"'):
-                    i, closed = _expansion(text, i, out, scanned)
+                    i, closed = _expansion(text, i, out, scanned, at_word_start and i == opened)
                     scanned.ok = scanned.ok and closed
                 else:
                     out.append(d)
@@ -636,7 +601,10 @@ def _scan(text: str, i: int = 0, closer: str | None = None) -> _Scanned:
             j = n if j < 0 else j
             scanned.literal.append(text[i:j])
             i = j
-        elif text.startswith("<<", i) and not text.startswith("<<<", i):
+        elif text.startswith("<<<", i):  # a herestring: its word is scanned as usual
+            out.append("<<<")
+            i += 3
+        elif text.startswith("<<", i):
             j, delimiter, quoted, strip = _heredoc_delimiter(text, i)
             out.append(text[i:j])
             pending.append((delimiter, quoted, strip))

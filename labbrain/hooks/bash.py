@@ -308,6 +308,10 @@ _MARKER = re.compile(f"({_VAR}[A-Za-z0-9_{_LIT}]*{_END})")
 # R19b: the only literal form, `"$(cat <<'EOF'` (or <<"EOF") as a whole word.
 _QUOTED_HEREDOC = re.compile(r"cat[ \t]+<<[ \t]*(['\"])([A-Za-z_][A-Za-z0-9_]*)\1[ \t]*\n")
 _WORD_BOUNDARY = set(" \t\n;&|()<>")
+_LIT_REF = re.compile(f"{_VAR}{_LIT}[0-9]+{_END}")
+# R19c(c): a command that could redefine `cat` (or what runs as it) gets no literals.
+_FUNCTION_DEF = re.compile(r"(?:^|[\s;&|(){}])function\s+\S|[^\s;&|(){}<>]\s*\(\s*\)")
+LITERAL_SPOILERS: tuple[str, ...] = ("alias", "unalias", "shopt", "enable", "hash")
 # Raw-text runs are split at these characters, never matched with a backtracking regex
 # (that is quadratic on long undelimited text); a run is a candidate when it holds / ~ or .
 _RAW_DELIMITERS = re.compile(r"[\s'\"`()<>;|&=,]+")
@@ -381,8 +385,8 @@ def _heredoc_literal(inner: str) -> list[str] | None:
     """Ruling R19b: the readings of a substitution that is exactly `cat` fed by one heredoc
     with a quoted delimiter (not `<<-`, not a herestring) and nothing else; else None.
 
-    The readings are the body and the body without its trailing newlines (what the
-    substitution yields)."""
+    The reading is the body without its trailing newlines (what the substitution yields);
+    a body whose parentheses do not balance is refused."""
     match = _QUOTED_HEREDOC.match(inner)
     if match is None:
         return None
@@ -392,8 +396,15 @@ def _heredoc_literal(inner: str) -> list[str] | None:
     k = lines.index(match.group(2))
     if "\n".join(lines[k + 1 :]).strip("\n"):
         return None  # something follows the heredoc
-    body = "".join(line + "\n" for line in lines[:k])
-    return list(dict.fromkeys([body, body.rstrip("\n")]))
+    body = "\n".join(lines[:k])
+    depth = 0
+    for c in body:  # R19c(d): bash 3.2 ends the substitution at the first unmatched `)`
+        depth += (c == "(") - (c == ")")
+        if depth < 0:
+            return None
+    if depth:
+        return None
+    return [body.rstrip("\n")]  # R19c(a): what the substitution yields, and only that
 
 
 def _substitution(inner: str, out: list[str], scanned: _Scanned, whole: bool) -> None:
@@ -860,6 +871,8 @@ class _Check:
         self.long_wild = False  # an over-long candidate starts with a wildcard
         self.seen: set[tuple[str, bool]] = set()  # candidate spellings already listed
         self.literals: list[list[str]] = []  # R19 substitution outputs, by global index
+        self.literals_off = False  # R19c(c): every literal reads as WILD
+        self.marked_texts: list[str] = []  # each level's marked text (no heredoc bodies)
         self.folded = fold(command)
         root = scope.env.get(ENV_PLUGIN_ROOT)
         self.plugin_root = canonical(root, self.home) if root else None
@@ -888,6 +901,7 @@ class _Check:
 
             scanned.marked = _LOCAL_REF.sub(renumber, scanned.marked)
             scanned.literal = [_LOCAL_REF.sub(renumber, body) for body in scanned.literal]
+        self.marked_texts.append(scanned.marked)
         tokens, lexed = _lex(scanned.marked)
         if not (scanned.ok and lexed):
             self.unconfident = True
@@ -904,7 +918,18 @@ class _Check:
             self.parse(inner, depth + 1)
 
     def _simple(self, words: list[str], bindings: dict[str, list[str]]) -> _Simple:
-        expanded = [self._expand(w, bindings) for w in words]
+        words = list(words)
+        for _ in range(4):  # R19c(b): a literal in program position is WILD
+            expanded = [self._expand(w, bindings) for w in words]
+            first = [alts[0] if alts else "" for alts in expanded]
+            positions = {v.pos for v in _views(words)} | {v.pos for v in _views(first)}
+            spoiled = [pos for pos in positions if _LIT in words[pos]]
+            for pos in spoiled:
+                words[pos] = _LIT_REF.sub(WILD, words[pos])
+            if not spoiled:
+                break
+        else:
+            expanded = [self._expand(w, bindings) for w in words]
         simple = _Simple(words, expanded, [])
         simple.views = _views(simple.first)
         for view in simple.views:
@@ -983,7 +1008,7 @@ class _Check:
         if depth > 8:
             return [WILD]
         if name.startswith(_LIT):
-            return list(self.literals[int(name[1:])])
+            return [WILD] if self.literals_off else list(self.literals[int(name[1:])])
         if name in bindings:
             out: list[str] = []
             for value in bindings[name]:
@@ -1425,8 +1450,32 @@ class _Check:
             return False
         return result.returncode == 0
 
+    def _literals_unsafe(self) -> bool:
+        """R19c(c): could this command redefine `cat`, or is it dynamic already?"""
+        if self.unconfident or self.dangerous:
+            return True
+        text = "\n".join(fold(t) for t in self.marked_texts)
+        if _FUNCTION_DEF.search(text):
+            return True
+        words = (*LITERAL_SPOILERS, *UNCONFIDENT_WORDS)
+        if any(_delimited(word, text, loose=True) for word in words):
+            return True
+        return any(
+            (match := _ASSIGN.match(word)) is not None and match.group(1) == "PATH"
+            for simple in self.simples
+            for word in simple.marked
+        )
+
+    def _reparse_without_literals(self) -> None:
+        self.simples, self.raw, self.literals, self.marked_texts = [], [], [], []
+        self.unconfident = self.dangerous = False
+        self.literals_off = True
+        self.parse(self.command)
+
     def run(self) -> Denial | None:
         self.parse(self.command)
+        if self.literals and self._literals_unsafe():
+            self._reparse_without_literals()
         if any(_delimited(word, self.folded, loose=True) for word in UNCONFIDENT_WORDS):
             self.unconfident = True  # e.g. exec() inside python -c, find -exec
         self.collect()

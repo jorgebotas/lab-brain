@@ -31,6 +31,12 @@ from labbrain.hooks.scope import Scope, load_scope
 
 SESSION = "00000000-0000-4000-8000-000000000001"
 
+
+def _h(body: str) -> str:
+    """A whole-word quoted-heredoc substitution (ruling R19b's only literal form)."""
+    return f"\"$(cat <<'EOF'\n{body}\nEOF\n)\""
+
+
 # (case_id, command, expected). Placeholders: {tmp}, {R}, {R_upper}, {plugin_root}.
 CASES: list[tuple[str, str, str]] = [
     # --- data paths named directly, through ~, $HOME, .., links, case and globs
@@ -145,6 +151,56 @@ CASES: list[tuple[str, str, str]] = [
     ("locale-quote", 'cat {tmp}/mnt/$"phi"/rows.csv', "deny"),
     ("heredoc-literal-relative", "cat \"$(cat <<'EOF'\n../mnt/phi/rows.csv\n\nEOF\n)\"", "deny"),
     ("commit-heredoc-dquote-delim", 'git commit -m "$(cat <<"EOF"\nfix: x\nEOF\n)"', "allow"),
+    # ruling R19c: literal words never name programs, nor survive redefinitions
+    ("lit-prog-sh", _h("sh") + " -c 'cat mn''t/phi/rows.csv'", "deny"),
+    ("lit-prog-sh-blank", _h("sh\n") + " -c 'cat mn''t/phi/rows.csv'", "deny"),
+    (
+        "lit-prog-python",
+        _h("python3") + """ -c 'print(open("mn"+"t/phi/rows.csv").read())'""",
+        "deny",
+    ),
+    ("lit-prog-bash-herestring", _h("bash") + " <<<'cat mn''t/phi/rows.csv'", "deny"),
+    ("lit-prog-grep-r", _h("grep") + " -r . ..", "deny"),
+    ("lit-prog-env-wrapper", _h("env") + " grep -r . ..", "deny"),
+    ("lit-prog-after-env", "env " + _h("grep") + " -r . ..", "deny"),
+    ("lit-prog-claude", _h("claude") + " -p hi", "deny"),
+    (
+        "fn-cat-literal",
+        "cat() { echo mnt/qhi/rows.csv | tr q p; }; head " + _h("README.md"),
+        "deny",
+    ),
+    (
+        "fn-keyword-cat",
+        "function cat { echo mnt/qhi/rows.csv | tr q p; }; head " + _h("README.md"),
+        "deny",
+    ),
+    (
+        "eval-fn-cat",
+        "eval 'cat() { tr q p <<<mnt/qhi/rows.csv; }'; head " + _h("README.md"),
+        "deny",
+    ),
+    (
+        "source-fn-cat",
+        "printf 'cat() { tr q p <<<mnt/qhi/rows.csv; }' > f.sh; . ./f.sh; head " + _h("README.md"),
+        "deny",
+    ),
+    (
+        "alias-cat",
+        "shopt -s expand_aliases\nalias cat='tr q p <<<mnt/qhi/rows.csv #'\nhead "
+        + _h("README.md"),
+        "deny",
+    ),
+    ("path-cat", "PATH=$PWD/b:$PATH head " + _h("README.md"), "deny"),
+    ("hash-cat", "hash -p $PWD/b/cat cat; head " + _h("README.md"), "deny"),
+    ("enable-n-cat", "enable -n cat; head " + _h("README.md"), "deny"),
+    ("paren-body", "cat " + _h(')mnt/p"hi"/rows.csv"'), "deny"),
+    (
+        "commit-heredoc-parens",
+        "git commit -m " + _h("feat(hooks): x\n\nCo-Authored-By: A <a@b>"),
+        "allow",
+    ),
+    ("commit-heredoc-apostrophe", "git commit -m " + _h("fix: don't drop rows"), "allow"),
+    ("head-literal-file", "head " + _h("README.md"), "allow"),
     # ruling R19a: escapes and other conversions are not literal
     ("printf-escape", "cat {tmp}/mnt/$(printf 'p\\x68i')/rows.csv", "deny"),
     ("echo-e-escape", "cat {tmp}/mnt/$(echo -e 'p\\x68i')/rows.csv", "deny"),

@@ -349,9 +349,8 @@ CASES: list[tuple[str, str, str]] = [
     ("r27b-braced-star", "cat ../mnt/p${{*}}hi/rows.csv", "deny"),
     ("r27b-star-alone", 'IFS=; set -- ../mnt/p hi/rows.csv; cat "${{*}}"', "deny"),
     ("r27b-zero", "cat ../mnt/p$0hi/rows.csv", "deny"),
-    # `$?` and `$$` are digits: `p<digits>hi` cannot be `phi` (R29; see DIGIT_ROOT_CASES)
-    ("r27b-status", "cat ../mnt/p$?hi/rows.csv", "allow"),
-    ("r27b-pid", "cat ../mnt/p$$hi/rows.csv", "allow"),
+    ("r27b-status", "cat ../mnt/p$?hi/rows.csv", "deny"),  # R32: joined, `$?` is `*`
+    ("r27b-pid", "cat ../mnt/p$$hi/rows.csv", "deny"),
     ("r27b-bg-pid", "cat ../mnt/p$!hi/rows.csv", "deny"),  # `$!` may be empty
     ("r27b-flags", "cat ../mnt/p${{-}}hi/rows.csv", "deny"),
     ("r27b-heredoc", "cat <<EOF\n../mnt/p$1hi/rows.csv\nEOF", "deny"),
@@ -373,7 +372,9 @@ CASES: list[tuple[str, str, str]] = [
     ("r29-export-one", "set -- hi; export X=$1; cat ../mnt/p$X/rows.csv", "deny"),
     ("r29-program-var", "set -- claude; X=$1; $X -p hi", "deny"),
     ("r29-echo-rc", "python train.py; rc=$?; echo $rc", "allow"),
-    ("r29-echo-rc-labelled", 'python train.py; rc=$?; echo "rc=$rc"', "allow"),
+    # R32, an accepted false positive: the piece after `=` is the glob `*`, which matches
+    # the repo's `data` link into R (from a cwd without such a link it is allowed)
+    ("fp-echo-rc-labelled-link", 'python train.py; rc=$?; echo "rc=$rc"', "deny"),
     ("r29-for-at-echo", 'set -- a b; for f in "$@"; do echo "$f"; done', "allow"),
     ("r27b-exit-status", 'python train.py; echo "exit: $?"; rc=$?; echo $rc $$', "allow"),
     ("r27b-arg-alone", "sh -c 'echo \"$1\"' _ hello", "allow"),
@@ -410,8 +411,8 @@ CASES: list[tuple[str, str, str]] = [
     ),
 ]
 
-# A third world: an extra root `<tmp>/mnt/run1`, whose digit a numeric parameter can spell
-# (ruling R29). Each row also runs from a clean cwd.
+# A third world: extra roots `<tmp>/mnt/run1` and `<tmp>/mnt/run-1`, which a special
+# parameter can complete (rulings R29 and R32). Each row also runs from a clean cwd.
 DIGIT_ROOT_CASES: list[tuple[str, str, str]] = [
     ("r29-status-direct", "cat ../mnt/run$?/rows.csv", "deny"),
     ("r29-status-end", "ls ../mnt/run$?", "deny"),
@@ -422,11 +423,28 @@ DIGIT_ROOT_CASES: list[tuple[str, str, str]] = [
     ("r29-declare-status", "false; declare -x rc=$?; ls ../mnt/run$rc", "deny"),
     ("r29-local-status", "f() {{ local rc=$?; ls ../mnt/run$rc; }}; false; f", "deny"),
     ("r29-pid-assigned", "n=$$; ls ../mnt/run$n", "deny"),
-    ("r29-status-digits", "ls ../mnt/run$?$#", "allow"),  # two digits: never run1
+    ("r29-status-digits", "ls ../mnt/run$?$#", "deny"),
+    # --- ruling R32: zsh. `$?` can be negative (root run-1); `$#` before a name or a
+    # special character is a length that swallows it (`$#hi` with hi=x is 1: root run1)
+    ("r32-neg-direct", "f() {{ return -1; }}; f; cat ../mnt/run$?/rows.csv", "deny"),
+    ("r32-neg-ls", "f() {{ return -1; }}; f; ls ../mnt/run$?", "deny"),
+    ("r32-neg-assigned", "f() {{ return -1; }}; f; rc=$?; cat ../mnt/run$rc/rows.csv", "deny"),
+    ("r32-len-status", "cat ../mnt/run$#?/rows.csv", "deny"),
+    ("r32-len-name-direct", "hi=x; cat ../mnt/run$#hi/rows.csv", "deny"),
+    ("r32-len-name-bound", "hi=x; n=$#hi; cat ../mnt/run$n/rows.csv", "deny"),
+    ("r32-len-for", "hi=x; for n in $#hi; do cat ../mnt/run$n/rows.csv; done", "deny"),
+    ("r32-len-export", "hi=x; export n=$#hi; cat ../mnt/run$n/rows.csv", "deny"),
+    ("r32-len-dash", "cat ../mnt/run$#-/rows.csv", "deny"),
+    ("r32-len-dash-ls", "ls ../mnt/run$#-", "deny"),
+    ("r32-len-pid", "cat ../mnt/run$#$/rows.csv", "deny"),
+    ("r32-len-pid-ls", "ls ../mnt/run$#$", "deny"),
+    ("r32-braced-len", "hi=x; cat ../mnt/run${{#hi}}/rows.csv", "deny"),
+    ("r32-braced-status", "f() {{ return -1; }}; f; ls ../mnt/run${{?}}", "deny"),
+    ("r32-exit-status", 'f() {{ return -1; }}; f; echo "exit: $?"; rc=$?; echo $rc', "allow"),
     ("r29-bg-pid-empty", "ls ../mnt/run$!1", "deny"),  # `$!` is empty without a job
     ("special-params", "echo $? $#", "allow"),
     ("r29-echo-rc", "python train.py; rc=$?; echo $rc", "allow"),
-    ("r29-exit-status", 'python train.py; echo "exit: $?"; rc=$?; echo "rc=$rc" $$', "allow"),
+    ("r29-exit-status", 'python train.py; echo "exit: $?"; rc=$?; echo $rc $$', "allow"),
 ]
 
 # A second world: a real data folder `repo/data` (a root) that repo/.gitignore lists.
@@ -479,7 +497,7 @@ def make_bash_world(
     monkeypatch: pytest.MonkeyPatch,
     *,
     gitignored: bool = False,
-    digit_root: bool = False,
+    digit_roots: tuple[str, ...] = (),
 ) -> BashWorld:
     """A protected subfolder-mode vault `repo/brain` in a git repo `repo`, the cwd.
 
@@ -512,10 +530,10 @@ def make_bash_world(
     (repo / "README.md").write_text("# repo\n")
     (repo / "train.py").write_text("print('train')\n")
     data_paths = [str(root), str(spaced)]
-    if digit_root:  # `<tmp>/mnt/run1`, a root a digit completes
-        (tmp / "mnt" / "run1").mkdir()
-        (tmp / "mnt" / "run1" / "rows.csv").write_text(sentinel)
-        data_paths.append(str(tmp / "mnt" / "run1"))
+    for name in digit_roots:  # e.g. `<tmp>/mnt/run1`: roots a special parameter completes
+        (tmp / "mnt" / name).mkdir()
+        (tmp / "mnt" / name / "rows.csv").write_text(sentinel)
+        data_paths.append(str(tmp / "mnt" / name))
     if gitignored:
         (repo / "data").mkdir()
         (repo / "data" / "rows.csv").write_text(sentinel)
@@ -586,12 +604,24 @@ def test_corpus(
 def test_digit_root_corpus(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case_id: str, command: str, expected: str
 ) -> None:
-    w = make_bash_world(tmp_path, monkeypatch, digit_root=True)
-    assert len(w.scope().targets.roots) == 3
+    w = make_bash_world(tmp_path, monkeypatch, digit_roots=("run1", "run-1"))
+    assert len(w.scope().targets.roots) == 4
     assert _decision(w.check(command)) == expected, w.render(command)
     w.cwd = w.tmp / "work"  # a cwd with no links into a root
     w.cwd.mkdir()
     assert _decision(w.check(command)) == expected, ("clean cwd", w.render(command))
+
+
+def test_negative_status_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """R32: zsh's `$?` can be negative, so `run$?` reaches a root `run-1` with no `run1`."""
+    w = make_bash_world(tmp_path, monkeypatch, digit_roots=("run-1",))
+    rows = [row for row in DIGIT_ROOT_CASES if row[0].startswith(("r32-neg", "r32-braced-st"))]
+    assert len(rows) == 4
+    for cwd in (w.repo, w.tmp / "work"):
+        cwd.mkdir(exist_ok=True)
+        w.cwd = cwd
+        for case_id, command, expected in rows:
+            assert _decision(w.check(command)) == expected, (case_id, cwd.name)
 
 
 @pytest.mark.parametrize(

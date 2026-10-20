@@ -307,20 +307,18 @@ _SEPARATORS = set(";|()&\n")
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _ASSIGN = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)(\+?)=")
 _SPECIAL = set("?#$!@*-0123456789")
-# Ruling R27b: special parameters. `$?`, `$#` and `$$` are digits: the pre-pass marks them
-# _DIGITS. `$!` (digits, or empty) and `$-` (option letters) are marked _LETTERS. `$0`-`$9`,
-# `${n}` and `$@` each hold one word of the command (or WILD): marked _POSITIONAL. `$*`
-# joins them all with IFS: WILD. The marks survive binding (R29: `rc=$?`, `for f in "$@"`)
-# and `_params` resolves them where a word is used, after expansion.
-_DIGITS = "\ue005"
+# Rulings R27b, R29 and R32: special parameters. `$? $# $$ $! $-` (zsh's `$?` can be
+# negative) are marked _SHORT. `$0`-`$9`, `${n}` and `$@` each hold one word of the command
+# (or WILD): marked _POSITIONAL. `$*` joins them all with IFS: WILD. zsh reads `$#` before
+# a name or a special character as a length that swallows it (`$#hi`, `$#?`): _REST makes
+# the rest of the word WILD. The marks survive binding (`rc=$?`, `for f in "$@"`), and
+# `_params` resolves them where a word is used, after expansion.
+_SHORT = "\ue005"
 _POSITIONAL = "\ue006"
-_LETTERS = "\ue007"
-_DIGIT_PARAMS = frozenset("?#$")
-_LETTER_PARAMS = frozenset("!-")
-_SHORT_PARAMS = {**dict.fromkeys(_DIGIT_PARAMS, _DIGITS), **dict.fromkeys(_LETTER_PARAMS, _LETTERS)}
-_SHORT_PARAMS.update({"*": WILD, "@": _POSITIONAL})
+_REST = "\ue007"
+_SHORT_PARAMS = {**dict.fromkeys("?#$!-", _SHORT), "*": WILD, "@": _POSITIONAL}
 _SHORT_PARAMS.update(dict.fromkeys("0123456789", _POSITIONAL))
-_PARAM_MARKS = _DIGITS + _LETTERS
+_ZSH_LENGTH = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_?$*@#-")
 _MARKS = re.compile("[\ue000-\ue007]")  # the pre-pass's own marks: never in a command
 # Ruling R19b: a whole-word `"$(cat <<'EOF' … EOF)"` stands for its literal heredoc body;
 # the pre-pass marks it _VAR _LOCAL k _END, which _Check.parse renumbers _VAR _LIT k _END.
@@ -519,6 +517,9 @@ def _expansion(
     if match:
         out.append(_VAR + match.group() + _END)
         return match.end(), True
+    if nxt == "#" and i + 2 < n and text[i + 2] in _ZSH_LENGTH:  # zsh's `$#hi`, `$#?`
+        out.append(_REST)
+        return i + 2, True
     if nxt and nxt in _SPECIAL:  # $? $# $$ $! $- / $0-$9 $@ / $*: see _params
         out.append(_SHORT_PARAMS[nxt])
         return i + 2, True
@@ -1660,21 +1661,21 @@ _readings = readings  # ruling R22's two readings, under the name this module ha
 
 
 def _params(word: str) -> str:
-    """Rulings R27b and R29: an expanded `word` (or value) with its special-parameter marks
+    """Rulings R27b, R29 and R32: an expanded `word` (or value) with its special-parameter marks
     resolved where it is used.
 
-    A word made only of `$? $# $$ $! $-` names no path: each is `_`. Joined to anything
-    else, each is a glob of what it can hold, `[0-9]*` for the digits of `$?`, `$#` and
-    `$$`, `*` for `$!` (maybe empty) and `$-`: rule 5 judges it like any glob, and since it
-    can hold no `/` or `..` it does not deny as a leading WILD would. A positional
-    parameter alone (`$1`, `"$@"`) holds one word of the command, a candidate in its own
-    right: `_`. Joined to anything, another parameter included (`$1$2`), it is WILD."""
-    if word == _POSITIONAL or (word and not word.strip(_PARAM_MARKS)):
+    From zsh's length form (`$#hi`), the rest of the word is WILD. A word made only of
+    `$? $# $$ $! $-` names no path: each is `_`. Joined to anything else, each is `*`
+    (R32): rule 5 judges it like any glob, and since it can hold no `/` or `..` it does not
+    deny as a leading WILD would. A positional parameter alone (`$1`, `"$@"`) holds one
+    word of the command, a candidate in its own right: `_`. Joined to anything, another
+    parameter included (`$1$2`), it is WILD."""
+    if _REST in word:
+        word = word[: word.index(_REST)] + WILD
+    if word == _POSITIONAL or (word and not word.strip(_SHORT)):
         return "_" * len(word)
-    if _DIGITS in word:
-        word = word.replace(_DIGITS, "[0-9]*")
-    if _LETTERS in word:
-        word = word.replace(_LETTERS, "*")
+    if _SHORT in word:
+        word = word.replace(_SHORT, "*")
     return word.replace(_POSITIONAL, WILD) if _POSITIONAL in word else word
 
 

@@ -24,6 +24,61 @@ Update with `claude plugin update lab-brain@lab-brain`. An installed plugin buil
 once per version; when you run the plugin from a local checkout, uv older than 0.11 may reuse
 a stale build of it, which `UV_NO_CACHE=1` (or uv 0.11 or newer) avoids.
 
+## Hooks
+
+The plugin also installs four Claude Code hooks. They run the same engine through `uvx`, so
+`uv` must be on `PATH`.
+
+- **Data guard** (before every tool call): in a vault with `protected_data: true`, blocks any
+  tool call that names a `data_paths` entry, or searches into one, whether through Read, Glob,
+  Grep, an MCP tool or a Bash command.
+- **Frozen-file guard** (before writes): blocks rewrites of frozen notes, existing `raw/`
+  files and manuscripts outside `manuscripts/_proposals/`. Notes not yet committed stay
+  editable.
+- **Write validator** (before and after writes): in a protected vault, blocks content that
+  matches a PHI pattern before it is written; after each write, shows schema errors to the
+  agent so it fixes them.
+- **Session brief** (session start): regenerates `index.md` and adds the short brief to the
+  session.
+
+The guard fails closed. If the engine cannot start, `uv` is missing, the input is malformed
+or the vault config does not load, the call is blocked. With a broken config the agent may
+only read `.labbrain/`, so it can tell you what is wrong. The hooks never approve a call:
+your own permission prompts still apply. Claude Code 2.1.295 or later is recommended, because
+older versions let a call proceed when a hook times out.
+
+What this means in practice:
+
+- **You, not the agent, change the guard.** In a protected vault the agent may not edit
+  `.labbrain/`, `.copier-answers.yml` or `.claude/settings*.json`, change the plugin, run
+  `copier update`, or start another agent CLI. Make those changes yourself.
+- **Analysis code reads data paths from config files.** A command that names a data path is
+  blocked, so write `python train.py --config configs/a.yaml`, not
+  `python train.py /data/rows.csv`.
+- **Search a narrower folder.** A recursive search (`grep -r`, `find`, Glob, Grep) from a
+  folder that contains a data path is refused. `rg` from a code repo whose data folder is
+  gitignored is allowed. In a protected vault, a Glob or Grep from a folder with more than
+  20,000 entries, or from `/` or `~`, is refused too.
+- **Commit messages** go through `git commit -m "$(cat <<'EOF' … EOF)"` or `git commit -F`;
+  other command substitutions can stand for any path, so they may be blocked.
+
+Known gaps: the guard reads command text, so it cannot see what a program opens or prints
+(by design: training runs read data), nor obfuscated or encoded paths, paths built inside
+inline code, or hard links. Also not caught:
+
+- MCP tools that write vault files bypass the frozen-file guard, the PHI pre-scan and the
+  post-write validator; lint and pre-commit catch them at commit.
+- `git -C` or `--git-dir` with a pre-written repository config can run code.
+- `RIPGREP_CONFIG_PATH` could add `--follow` to `rg` (mitigated by the link walk).
+
+Frozen notes edited through Bash are caught by lint and pre-commit, not by the hooks. For a
+stronger boundary, Claude Code's
+OS-level Bash sandbox can deny reads of the data paths, at the cost of blocking training runs
+in the session.
+
+These guardrails make the safe path the default. They do not replace your institution's DUA,
+IRB or security rules.
+
 ## Commands
 
     labbrain vault root                 # where am I?
@@ -53,6 +108,7 @@ write.
     uv run pytest -m smoke              # headless skill runs; needs claude and ANTHROPIC_API_KEY
                                         # (or LABBRAIN_SMOKE_LOGIN=1 to use your login)
     scripts/m4-gate.sh                  # install from a local marketplace and run /lab-brain:brief
+    scripts/m5-gate.sh                  # hooks smoke tests: data reads and frozen edits blocked
 
 ## Safety
 

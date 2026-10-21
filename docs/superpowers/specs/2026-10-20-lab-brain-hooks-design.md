@@ -50,7 +50,8 @@ Captured on 2026-10-20 with the installed Claude Code 2.1.284, using real hook p
   - Write: `{file_path, content}`.
   - Edit: `{file_path, old_string, new_string, replace_all}`.
   - Bash: `{command, description}`.
-- **No Grep or Glob tools in this build.** Asked to grep and glob, the agent used Bash (`grep -r`, `ls *.txt`). Older and other builds have Grep, with `path`, `glob` and `pattern`, and Glob, with `path` and `pattern`. Both must still be handled.
+- **No Grep or Glob tools in 2.1.284.** Asked to grep and glob, the agent used Bash (`grep -r`, `ls *.txt`). Other builds have Grep, with `path`, `glob` and `pattern`, and Glob, with `path` and `pattern`. Both must still be handled.
+- **Glob in 2.1.304** (checked at build time). CLI 2.1.304 does have a Glob tool. It runs `rg --files --null --glob <p> --sort=modified --no-ignore --hidden`, with no `--follow`. Claude Code splits an absolute pattern at the first `*?[{`, rewrites overlapping leading components, and resolves `..` textually (Node `path`).
 - **Exit codes.** Exit 2 blocks a PreToolUse call and shows stderr to Claude. On PostToolUse, exit 2 shows stderr to Claude. Any other non-zero exit is a non-blocking error: **the tool call proceeds**.
 - **Fail-closed form, verified.** A shell-form command `<engine> hook … || exit 2` whose engine is missing blocked both a Bash and a Read call on 2.1.284.
 - **`onFailure: "block"`** (CLI 2.1.295 or later) also blocks on timeout and on start failure. On 2.1.284 the key is tolerated: the hook still loaded and ran. Without it, **a timed-out PreToolUse hook lets the call proceed**.
@@ -141,9 +142,13 @@ For writes, the frozen-file guard and validator use the vault that contains the 
   - deny when its search root (`path`, default cwd) is inside a protected root;
   - deny when its search root is an ancestor of one (a recursive search would enter it);
   - deny when its `glob` names a protected path.
-- **Glob:** deny when the pattern, joined to `path`, could match a path inside a protected root:
-  - a literal prefix inside a root;
-  - or a prefix that is an ancestor of a root, with `**` or components that `fnmatch` the remaining path.
+- **Glob** is a recursive construct (rulings R20, R21). It is denied when a protected root is inside or under any search base. The bases are:
+  - `path`, or the cwd;
+  - the deepest literal directory before Claude Code's wildcard cut (section 3);
+  - and literal runs of the pattern.
+  - A component starting with `!`, or any `\`, is denied.
+- Glob and Grep also run the link-exposure walk of Bash rule 6b (ruling R10).
+- **Two readings of every path** (ruling R22). Every path is judged both physically (symlinks resolved first) and textually (`..` collapsed). Either reading inside a protected root denies.
 - **Bash:** see below.
 - **Known tools that carry no file paths** (Agent/Task, TodoWrite, ToolSearch, Skill, AskUserQuestion, WebSearch and the like): skipped. The list is explicit, and subagents' own tool calls are hooked anyway.
 - **Every other tool, including `mcp__*`:** every string value in `tool_input` (walked recursively, size-capped) is a path candidate:
@@ -157,14 +162,22 @@ For writes, the frozen-file guard and validator use the vault that contains the 
    - Lex the command with a shell-aware lexer. If lexing fails, fall back to splitting on whitespace and shell metacharacters.
    - Candidates are:
      - every word;
-     - every path-like substring of the raw command text (runs containing `/` or starting with `~` or `.`).
+     - every path-like substring of the raw command text (runs containing `/` or starting with `~` or `.`);
+     - the path-like pieces of each token split on `: [ ] { } @ ! $ % ^ * + ?` (ruling R17), so `file:../x` and `[../x]` count. The extra split applies only to text with no wildcard, so rules 2 and 5 still see the whole token. MCP strings get the same split.
    - Scanning the raw text also covers heredoc bodies and the code inside `python -c`, `node -e`, `duckdb -c` and similar.
 2. **Expansion.**
    - Expand `~`, `~user`, `$HOME`/`${HOME}`, and variables assigned earlier in the same command (`X=/p; cat $X/f`).
    - Expand other variables from the hook's environment.
    - A for-loop variable stands for the loop's words, which are candidates in their own right.
-   - Special parameters (`$?`, `$#`, `$$`, `$!`, `$0`–`$9`, `$@`, `$*`) are not paths and are ignored.
+   - Special and positional parameters (`$?`, `$#`, `$$`, `$!`, `$0`–`$9`, `$@`, `$*`) standing alone are not paths and are ignored. Next to path text (`p$1hi`, `../mnt/p$@hi`) they are wildcards (ruling R27). Their marks survive binding into variables and loop lists and are resolved where the value is used (ruling R29).
    - **Wildcards.** A variable that cannot be bound to a value, a command substitution (`$(…)` or backticks), or a glob character makes that part of the candidate a wildcard.
+   - **Literal substitutions** (rulings R19b–R19e). The one substitution read as literal text is a whole word `"$(cat <<'EOF' … EOF)"` with a quoted delimiter, which is how commit messages and PR bodies are passed. It is literal only when:
+     - every program word in the command is exactly `git` or `gh`, running built-in subcommands: no `push`, `fetch` or `pull`, not `gh repo` or `gh gist`, and no `--` after `gh`;
+     - the command has no assignments and no carriage return;
+     - its parentheses are balanced;
+     - the literal is not in program position;
+     - and nothing in the command redefines programs (aliases, functions, shell-state builtins).
+     Every other substitution, including `echo` and `printf` forms, stays a wildcard.
      - A candidate whose first component is a wildcard (`$DATA_DIR/f`, `$(…)/f`) could point anywhere, so **deny**.
      - The hook's environment is not the Bash tool's environment (the Bash tool loads the user's shell profile), so an unknown variable must not be read as harmless.
    - Deny a command that assigns `HOME`, `CDPATH`, `PWD` or `OLDPWD`.
@@ -206,12 +219,17 @@ For writes, the frozen-file guard and validator use the vault that contains the 
 8. **Unconfident commands.** Unconfident means:
    - lexing failed;
    - or the command contains `eval`, `exec`, `source`/`.`, `xargs`, a pipe into `sh`/`bash`/`zsh`, or `base64`.
-   - For these, also deny when a protected root's final component appears as a delimited word in the text. Per the spec, the message asks the agent to have the user run the command themselves.
+   - For these, also deny when a protected root's final component appears as a delimited word in the text. The check also runs on the text with quote characters and backslashes removed (ruling R26), so `p""hi` and `p\hi` count. Per the spec, the message asks the agent to have the user run the command themselves.
    - Unknown variables and command substitutions are handled by rule 2.
+9. **Lexing details.**
+   - Redirection targets never name programs, scripts or `cd` targets (fix round 5).
+   - `<<<` is a herestring, not a heredoc (ruling R24).
+   - `$"…"` is a quoted string (ruling R24).
 
 **Grep and Glob tools.**
 - Grep is treated as `rg` (rule 6a, without the ignore exception, since the tool's flags are not visible).
-- Glob is treated as link-following (rule 6b).
+- Glob is a recursive construct, with the search bases above.
+- Both also run the link-exposure walk (rule 6b, ruling R10).
 
 **Guard self-protection** (protected vaults only). An agent that can edit the guard's configuration can switch the guard off. A prompt injection could ask for exactly that. So:
 - **File tools may not write these guard files:**
@@ -219,12 +237,14 @@ For writes, the frozen-file guard and validator use the vault that contains the 
   - `.claude/settings.json` and `.claude/settings.local.json` under the vault, under `$CLAUDE_PROJECT_DIR`, and under `~/.claude/`;
   - the guard's own code and caches: `${CLAUDE_PLUGIN_ROOT}/**`, `~/.claude/plugins/**` (which also holds `${CLAUDE_PLUGIN_DATA}`), and the uv cache directory.
     - These matter because `uvx --from` rebuilds the engine when its sources change.
+- **MCP tools** may not name guard files either (ruling R11). Paths embedded in longer MCP strings are candidates too (R12), and a string over the size cap denies (R13).
 - **Bash commands are denied when they:**
-  - name a guard file;
+  - name a guard file, or `mv`, `rm` or `ln` an ancestor of one (ruling R7);
   - run `copier`;
   - or start a nested agent CLI: `claude`, or any program named in the vault config's `agents` list (author names that double as CLI names; the default is `claude`, `codex`, `gemini`).
     - A nested agent can run without these hooks (`claude -p --settings '{"disableAllHooks":true}'`).
 - Reading guard files with the Read tool stays allowed.
+- A vault whose config fails to load allows only the Read tool on its `.labbrain/` files (section 4).
 - The user makes these changes themselves, and the README says so.
 
 **Messages.** For example: `lab-brain data guard: this Bash command refers to protected data path #1 ('<entry as configured>'). Individual-level data must not enter the session. If you need this run, ask the user to run it themselves and share only aggregate results.` A message never includes the command, the candidate path or any file contents.
@@ -251,13 +271,13 @@ For writes, the frozen-file guard and validator use the vault that contains the 
 1. **Manuscripts.** Deny any write under `manuscripts/` outside `manuscripts/_proposals/`, including new files.
 2. **Raw files.** Deny modification of any `raw/` file that already exists on disk. A new file under `raw/` is allowed: that is ingest. This is stricter than lint, and matches the template's `Edit(/raw/**)` deny rule.
 3. **Frozen notes.**
-   - A note is frozen when its committed version (git `HEAD`) is frozen under `frozen_rules.POLICIES`:
+   - A note is frozen when its committed version (git `HEAD`) is frozen under `POLICIES`, which now lives in `labbrain/frozen.py`:
      - a frozen status;
      - a type frozen on existence (`idea`, `handoff`, `dataset`);
      - or a protocol referenced by a done experiment at HEAD.
    - The proposed content is compared with that HEAD version using lint's `frozen-edit` comparison (`_compare`): mutable fields only, allowed status transitions, body insertions only. So the guard enforces exactly what lint would report at commit.
    - Deny on any finding, listing the finding messages. They are already value-free.
-   - The builder moves the shared pieces (`POLICIES`, `_frozen_at_base`, `_compare`) out of the lint rule into a module that both use, and does not duplicate them.
+   - The shared pieces (`POLICIES`, `frozen_at_base`, `compare`) live in `labbrain/frozen.py`, which the lint rule and the guard both use.
 4. **Proposed content does not parse.** On a frozen note, deny ("frozen note no longer parses"). On a non-frozen note, allow: the post-write validator reports it.
 
 **Baseline is git HEAD, as in lint.**
@@ -268,7 +288,7 @@ For writes, the frozen-file guard and validator use the vault that contains the 
 ## 7. Write validator
 
 - **Pre-write PHI block** (PreToolUse, protected vaults, files in PHI scan scope):
-  - scan the proposed content with `phi.scan_text`, using the vault's settings and allowlist;
+  - scan the proposed content with `phi.scan_text`, using the vault's settings, plus the vault's line-hash allowlist;
   - deny on any hit, reporting rule names and line numbers only.
   - *My call, beyond spec section 8,* which runs the scan only after the write: blocking first means PHI never lands on disk. The post-write scan below still runs.
 - **Post-write validation** (PostToolUse, Write, Edit, MultiEdit and NotebookEdit inside a vault):
@@ -284,6 +304,8 @@ On every SessionStart source, `labbrain hook session-start`:
 1. Finds the vault. With no vault, it prints nothing and exits 0.
 2. Regenerates `index.md`, as spec section 10 requires.
 3. Prints `labbrain brief --short`: at most four lines, including the engine-version warning.
+   - Note titles pass through `findings.sanitize`, so PHI-shaped text in a title is redacted (ruling R8).
+   - If `index.md` cannot be regenerated, the counts line says so (" · index.md not regenerated"), keeping the brief at four lines (ruling R9).
 
 **Errors**
 - A vault config that fails to load prints one line, "lab-brain: vault config error; ask the user to fix .labbrain/config.yaml (`labbrain lint` shows the problem)", and exits 0. The guard blocks other calls until it is fixed (section 4).
@@ -360,6 +382,11 @@ A separate small PR in `lab-brain-template`, as in M4:
 - **Hard links** to individual files inside a protected root are not detected, as with the M4 tracker guard.
 - **The plugin must be enabled and `uv` installed.** If `uv` is missing, every tool call in a session with the plugin enabled is blocked. That is loud, but it fails closed.
 - **Bash writes to frozen notes** are caught only at lint or commit.
+- **MCP tools that write vault files** bypass the frozen-file guard, the PHI pre-scan and the post-write validator (ruling R14). Lint and pre-commit catch them at commit.
+- **Percent-encoded or `file://` URL spellings** of a data path are not decoded (ruling R16).
+- **`RIPGREP_CONFIG_PATH`** could add `--follow` to `rg`. The link-exposure walk mitigates it.
+- **`git -C` or `--git-dir` with a pre-written repository config** can run code.
+- **Paths built by concatenation or encoding inside inline code**, when no link into a root sits under the cwd.
 
 ## 13. Decided here vs left to the builder
 
@@ -385,3 +412,27 @@ A separate small PR in `lab-brain-template`, as in M4:
 - Exact timeouts within section 4's constraints.
 - The fast-check fallback for the brief.
 - The ADR wording.
+
+## 14. Build rulings (2026-10-20)
+
+Controller rulings made during the build. The sections above have been updated to match; this list is the index.
+
+- **R4.** The Bash corpus and its world are module-level in `tests/test_hook_bash.py`, so the integration tests replay every row through `run_hook`.
+- **R7.** `mv`, `rm` and `ln` of an ancestor of a guard file (`.labbrain`, `.claude`, the vault) are denied.
+- **R8, R9.** Brief titles pass through `findings.sanitize`; an index failure is appended to the counts line.
+- **R10.** Glob and Grep run the link-exposure walk, and deny a link below a search base that points into a root.
+- **R11–R13.** Self-protection covers MCP tools; paths embedded in MCP strings are candidates; over-cap strings deny.
+- **R14, R16.** MCP writes to vault files and percent-encoded or `file://` spellings are residual risks (section 12).
+- **R15.** An unknown `~user` is a relative name, as the shell leaves it.
+- **R17.** Candidate extraction also splits path-like tokens on `: [ ] { } @ ! $ % ^ * + ?` and adds the path-like pieces, for MCP strings and Bash (so `file:../x` and `[../x]` are caught). In Bash the extra split applies only to text with no wildcard, so the glob and variable rules still see the whole token.
+- **R18.** A Glob `[^…]` class is a negation, as in ripgrep, and is matched as `[!…]`, so `p[^x]i/*` cannot slip past a root `phi`.
+- **R19a–R19e.** Substitutions are wildcards, except the whole-word quoted `cat` heredoc in pure `git`/`gh` commands (section 5, rule 2). No `echo` or `printf` form is ever literal.
+- **R20, R21, R23.** Glob is a recursive construct with Claude Code's search bases; a pattern with more than 16 literal directories is unsure and denies.
+- **R22.** Every path is judged physically and textually.
+- **R26.** Rule 8's basename check also runs on quote- and backslash-stripped text.
+- **R24.** `<<<` is a herestring, not `<` plus a quoted heredoc (which hid a nested `$(claude)`), and `$"…"` is a quoted string.
+- **R27.** An assignment-only command with a redirection still binds (a); special and positional parameters next to path text are wildcards (b).
+- **R29.** Special-parameter marks survive binding (for and select lists, assignments, `export`, `declare`, `local`, `readonly`) and are resolved where the value is used: next to path text they are wildcards, alone they are harmless, so `rc=$?; echo $rc` stays allowed.
+- **Fix round 5.** Redirections never name programs.
+- **Platform.** CLI 2.1.304 has a Glob tool (section 3).
+- **Frozen policy.** `POLICIES` lives in `labbrain/frozen.py`.

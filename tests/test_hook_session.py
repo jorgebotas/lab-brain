@@ -126,6 +126,16 @@ def test_plain_handoff_title_shown(tmp_path: Path) -> None:
     assert "Last handoff: HO-20261014-1420-claude  Registered the headline AUROC claim\n" in out
 
 
+def test_broken_second_vault_one_line(tmp_path: Path) -> None:
+    """Final review item 5: any broken vault in scope gives the config-error line, even when
+    the first one is healthy (the guard blocks every call until it is fixed)."""
+    healthy = toy_vault(tmp_path / "v")
+    broken = make_vault(tmp_path / "other", "project_name: [unclosed\n")
+    env = {"LABBRAIN_VAULT": str(broken)}
+    assert session_start(payload(healthy), env) == (0, CONFIG_ERROR, "")
+    assert session_start(payload(healthy), {}) != (0, CONFIG_ERROR, "")
+
+
 def test_subfolder_env_relative_vault(tmp_path: Path) -> None:
     project = tmp_path / "project"
     toy_vault(project / "brain")

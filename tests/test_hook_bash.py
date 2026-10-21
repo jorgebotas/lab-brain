@@ -420,6 +420,7 @@ CASES: list[tuple[str, str, str]] = [
     ("r34-continuation", "sh <<EOF\nX=hi; cat ../mnt/p\\$X/\\\nrows.csv\nEOF", "deny"),
     ("r34-options", "bash --rcfile x -o posix -- <<'EOF'\nX=hi; ls ../mnt/p$X\nEOF", "deny"),
     ("r34-dash-operand", "sh - a <<'EOF'\nX=hi; ls ../mnt/p$X\nEOF", "deny"),
+    ("r35-dash-c-delim", "sh <<'-cEOF' 2>/dev/null\nX=hi; cat ../mnt/p$X/rows.csv\n-cEOF", "deny"),
     ("r34-echo-hello", "sh <<'EOF'\necho hello\nEOF", "allow"),
     ("r34-echo-hello-unquoted", "bash <<EOF\necho \\$HOME is home\nEOF", "allow"),
     # --- everyday commands that must keep working
@@ -538,6 +539,11 @@ PUNCT_ROOT_CASES: list[tuple[str, str, str]] = [
     ("r33d-eq-sh-c", "sh -c 'false; ls ../mnt/run=$?'", "deny"),
     ("r33d-eq-heredoc", "sh <<'EOF'\nfalse; ls ../mnt/run=$?\nEOF", "deny"),
     ("r33d-joined", "ls ../mnt/run$?", "deny"),
+    # --- fix round 5: the text after each `=` is a candidate too
+    ("r35-option-eq", "python x.py --input=../mnt/run=1/rows.csv", "deny"),
+    ("r35-env-prefix", "IN=../mnt/run=1/rows.csv python x.py", "deny"),
+    ("r35-option-eq-dir", "python x.py --data=../mnt/run=1", "deny"),
+    ("r35-option-eq-ok", "python x.py --config=configs/a.yaml --lr=0.1", "allow"),
     ("r33d-echo-rc-eq", 'python train.py; echo "rc=$?"', "allow"),
     ("r33d-echo-rc-colon", 'python train.py; echo "status:$?"', "allow"),
     ("r33d-echo-flags", 'echo "flags=$-"', "allow"),
@@ -745,7 +751,7 @@ def test_r27_rows_from_a_clean_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     w.cwd.mkdir()
     assert w.scope().protected
     for case_id, command, expected in CASES:
-        if case_id.startswith(("r27", "r29", "r33", "r34")):
+        if case_id.startswith(("r27", "r29", "r33", "r34", "r35")):
             assert _decision(w.check(command)) == expected, (case_id, w.render(command))
 
 

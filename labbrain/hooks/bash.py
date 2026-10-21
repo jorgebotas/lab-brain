@@ -1166,16 +1166,17 @@ class _Check:
         (R34) the heredocs and herestrings `stdin` of a shell that reads its code there."""
         texts: list[str] = []
         words = simple.marked
+        end = len(words) - simple.targets
         for view in simple.views:
             rest = words[view.pos + 1 :]
             if view.name in SHELLS or view.name == "su":
-                for k, word in enumerate(rest[:-1]):
+                options = words[view.pos + 1 : end]  # redirection targets are no options
+                for k, word in enumerate(options[:-1]):
                     if word.startswith("-") and not word.startswith("--") and "c" in word:
-                        texts.append(rest[k + 1])
+                        texts.append(options[k + 1])
                         break
                 else:
-                    end = len(words) - simple.targets
-                    if view.name in SHELLS and _reads_stdin(words[view.pos + 1 : end]):
+                    if view.name in SHELLS and _reads_stdin(options):
                         texts.extend(stdin)
             elif view.name == "eval":
                 texts.append(" ".join(rest))
@@ -1247,13 +1248,17 @@ class _Check:
     # --------------------------------------------------------------- candidates
 
     def _pieces(self, text: str) -> Iterator[tuple[str, bool]]:
-        """`text` brace-expanded, then split at = : , and glued short options:
-        (piece, is the whole text)."""
+        """`text` brace-expanded, then split at = : , and glued short options, and the text
+        after each `=` (round 5: `--input=` a root named `run=1`): (piece, is the whole)."""
         for whole in _braces(text):
             yield self._tilde(_short(whole, True)), True
             pieces = _PIECE_SPLIT.split(whole)
             for piece in pieces[1:] if len(pieces) > 1 else ():
                 yield self._tilde(_short(piece, False)), False
+            at = whole.find("=")
+            while at >= 0:
+                yield self._tilde(_short(whole[at + 1 :], False)), False
+                at = whole.find("=", at + 1)
             glued = _GLUED_OPTION.match(whole)
             if glued:
                 yield self._tilde(_short(whole[glued.end() :], False)), False

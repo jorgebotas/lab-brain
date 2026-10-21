@@ -7,13 +7,22 @@ text can quote a command, a path or file contents. Output written to sys.stdout 
 sys.stderr by the checks themselves is discarded: only the returned strings reach Claude.
 That capture is Python-level only (the `sys` streams are swapped); a child process inherits
 the real file descriptors, so a check that runs one must capture its output itself.
+
+Ruling R37: a pre-tool-use call that runs past PRE_DEADLINE_S, well under the 120 s
+timeout in hooks.json, is denied from a SIGALRM handler with the fixed message, so no
+pathological input can outlast the hook (older Claude Code releases let a timed-out hook
+through). Where interval timers are missing, or off the main thread, there is no deadline.
 """
 
 from __future__ import annotations
 
 import contextlib
 import io
-from collections.abc import Callable, Mapping
+import os
+import signal
+import threading
+from collections.abc import Callable, Iterator, Mapping
+from types import FrameType
 
 from labbrain.hooks import bash, guard, post, session, writes  # noqa: F401  (bash: via guard)
 from labbrain.hooks.payload import parse_payload
@@ -25,7 +34,37 @@ PRE_FAILED = "lab-brain guard failed; blocked to be safe"
 POST_FAILED = "lab-brain validator failed"
 SESSION_FAILED = "lab-brain session brief failed"
 
+PRE_DEADLINE_S: float = 60  # seconds; hooks.json gives the hook 120
+
 Result = tuple[int, str, str]  # (exit code, stdout, stderr)
+
+
+def _deadline_passed(_signum: int, _frame: FrameType | None) -> None:
+    """Deny now: the fixed message straight to fd 2 (sys.stderr is a capture buffer here),
+    then exit 2 without unwinding, so nothing the check was doing can still print."""
+    with contextlib.suppress(OSError):
+        os.write(2, (PRE_FAILED + "\n").encode())
+    os._exit(2)
+
+
+@contextlib.contextmanager
+def _deadline(event: str) -> Iterator[None]:
+    """Arm the R37 deadline for a pre-tool-use call, and restore the timer and handler."""
+    armed = (
+        event == "pre-tool-use"
+        and hasattr(signal, "setitimer")
+        and threading.current_thread() is threading.main_thread()
+    )
+    if not armed:
+        yield
+        return
+    previous = signal.signal(signal.SIGALRM, _deadline_passed)
+    signal.setitimer(signal.ITIMER_REAL, PRE_DEADLINE_S)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, signal.SIG_DFL if previous is None else previous)
 
 
 def _pre_tool_use(stdin: bytes, env: Mapping[str, str]) -> Result:
@@ -61,6 +100,7 @@ def run_hook(event: str, stdin: bytes, env: Mapping[str, str]) -> Result:
         return 2, "", failed
     try:
         with (
+            _deadline(event),
             contextlib.redirect_stdout(io.StringIO()),
             contextlib.redirect_stderr(io.StringIO()),
         ):

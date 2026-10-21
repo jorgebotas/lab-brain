@@ -36,6 +36,21 @@ def test_finds_link_into_root(tmp_path: Path) -> None:
     assert links_under(start, targets, None, SESSION) == LinkScan(found=True, truncated=False)
 
 
+def test_walk_stops_at_the_first_exposing_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final review item 10: once one link leads into a root, the rest is not walked (so a
+    big tree below cannot truncate the answer)."""
+    root, start, targets = world(tmp_path)
+    (start / "data").symlink_to(root)  # top level: listed before any subdirectory
+    big = start / "big"
+    big.mkdir()
+    for n in range(20):
+        (big / f"f{n}.txt").write_text("")
+    monkeypatch.setattr(exposure, "WALK_LIMIT", 5)
+    assert links_under(start, targets, None, SESSION) == LinkScan(found=True, truncated=False)
+
+
 def test_finds_link_to_file_inside_root_and_to_an_ancestor(tmp_path: Path) -> None:
     root, start, targets = world(tmp_path)
     (start / "f.csv").symlink_to(root / "rows.csv")

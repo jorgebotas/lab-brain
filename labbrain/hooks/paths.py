@@ -53,8 +53,12 @@ def readings(p: Path | str, base: Path | None = None) -> list[Path]:
     canonicalised; it is only ever an extra check, returned when it differs. Errors
     propagate as for `canonical`.
     """
-    physical = canonical(p, base)
-    textual = canonical(os.path.normpath(_joined(p, base)))
+    joined = _joined(p, base)
+    physical = joined.resolve(strict=False)
+    collapsed = os.path.normpath(joined)
+    if collapsed == str(joined):  # no `..` to collapse: the same text, the same reading
+        return [physical]
+    textual = canonical(collapsed)
     return [physical] if textual == physical else [physical, textual]
 
 
@@ -84,6 +88,17 @@ PATHLIKE = re.compile(r"""[^\s'"`()<>;|&=,]*[/~.][^\s'"`()<>;|&=,]*""")
 STICKY = re.compile(r"[:\[\]{}@!$%^*+?]+")
 
 
+# Ruling R36 for free text (final review item 3): PATH_DELIMITERS splits at `=` and `,`, and
+# STICKY at `:`, but a root may hold them (`run=1`, a Hive partition). So a run split only
+# at LOOSE_DELIMITERS is a candidate too when it holds `=` or `,`, and so is the text after
+# each `=`, `,` or `:` in it. A suffix longer than SUFFIX_LIMIT cannot be opened as a path
+# (PATH_MAX, plus what a `~user` prefix can shed), so only the last ones are built.
+LOOSE_DELIMITERS = re.compile(r"""[\s'"`()<>;|&]+""")
+SUFFIX_MARKS = re.compile(r"[=,:]")
+SUFFIX_LIMIT = 4096 + 256
+SUFFIX_BUDGET = 32 * 1024 * 1024
+
+
 def path_like(token: str) -> bool:
     """Whether `token` (free of PATH_DELIMITERS) holds `/`, `~` or `.`."""
     return not PATH_CHARS.isdisjoint(token)
@@ -94,6 +109,53 @@ def path_runs(text: str) -> Iterator[str]:
     for run in PATH_DELIMITERS.split(text):
         if path_like(run):
             yield run
+
+
+def loose_runs(text: str) -> Iterator[str]:
+    """The path-like runs of `text` split only at LOOSE_DELIMITERS that hold `=` or `,`:
+    the runs `path_runs` would cut there (R36)."""
+    for run in LOOSE_DELIMITERS.split(text):
+        if ("=" in run or "," in run) and path_like(run):
+            yield run
+
+
+class TextTooLarge(Exception):
+    """A call's `Budget` of suffix text ran out; the caller denies (input too large)."""
+
+
+class Budget:
+    """The characters of suffix text one hook call may build (SUFFIX_BUDGET): each run's
+    suffixes are bounded, but text can repeat one run many times."""
+
+    def __init__(self, limit: int = 0) -> None:
+        self.left = limit or SUFFIX_BUDGET
+
+    def __repr__(self) -> str:
+        return f"Budget(left={self.left})"
+
+    def spend(self, n: int) -> None:
+        self.left -= n
+        if self.left < 0:
+            raise TextTooLarge
+
+
+def suffixes(run: str, budget: Budget) -> Iterator[str]:
+    """The text after each `=`, `,` or `:` of `run`, within its last SUFFIX_LIMIT characters
+    (R36), spending `budget`."""
+    for mark in SUFFIX_MARKS.finditer(run, max(0, len(run) - SUFFIX_LIMIT - 1)):
+        budget.spend(len(run) - mark.end())
+        yield run[mark.end() :]
+
+
+def joined_runs(text: str, budget: Budget) -> Iterator[str]:
+    """R36's extra candidates in free text: each run of `loose_runs`, and the path-like
+    `suffixes` of every path-like run split only at LOOSE_DELIMITERS, in order."""
+    for run in LOOSE_DELIMITERS.split(text):
+        if not path_like(run):
+            continue
+        if "=" in run or "," in run:
+            yield run
+        yield from filter(path_like, suffixes(run, budget))
 
 
 def sticky_pieces(token: str) -> list[str]:
@@ -164,9 +226,10 @@ class Targets:
     def __repr__(self) -> str:
         return f"Targets(roots={len(self.roots)}, guard_files={len(self.guard_files)})"
 
-    def containing(self, p: Path) -> ProtectedRoot | None:
-        """The root that `p` (under either spelling) is inside of or equal to, or None."""
-        names = spellings(p)
+    def containing(self, p: Path, names: Sequence[Path] = ()) -> ProtectedRoot | None:
+        """The root that `p` (under either spelling) is inside of or equal to, or None.
+        `names`, when given, is `spellings(p)` already computed."""
+        names = names or spellings(p)
         for candidate in names:
             for root in self.roots:
                 for path in (root.path, root.link):
@@ -196,10 +259,11 @@ class Targets:
         }
         return [r for r in self.roots if id(r) in found]
 
-    def is_guard_file(self, p: Path) -> bool:
-        """Whether `p` (under either spelling) is a guard file, or lies in a guarded tree."""
+    def is_guard_file(self, p: Path, names: Sequence[Path] = ()) -> bool:
+        """Whether `p` (under either spelling) is a guard file, or lies in a guarded tree.
+        `names`, when given, is `spellings(p)` already computed."""
         return any(
             _within(key, guard_key) if tree else key == guard_key
-            for key in map(fold, spellings(p))
+            for key in map(fold, names or spellings(p))
             for guard_key, tree in self._guard_folded
         )

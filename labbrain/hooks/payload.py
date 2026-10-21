@@ -76,6 +76,20 @@ class Denial:
     message: str  # already sanitized, single paragraph
 
 
+_UNCHECKED = (
+    "lab-brain data guard: {subject} cannot be checked safely here (too many files to check "
+    "for links, input too large, or a form the guard cannot read). Narrow the search folder "
+    "or ask the user to run it."
+)
+
+
+def unchecked_denial(subject: str) -> Denial:
+    """Final review item 2: the data-guard denial for `subject` when the guard hit one of its
+    bounds (a link walk past its entry limit, too much input) or a form it cannot judge, and
+    no particular protected root is implicated."""
+    return Denial("data-guard", _UNCHECKED.format(subject=subject))
+
+
 def data_denial(root: ProtectedRoot, subject: str) -> Denial:
     """The data-guard denial for `subject` (e.g. "this Bash command") touching `root`."""
     configured = " ".join(_CONTROL.sub(" ", root.configured).split())

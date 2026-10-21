@@ -226,6 +226,34 @@ def test_path_runs_and_sticky_pieces() -> None:
     assert paths.path_like("x.y") and not paths.path_like("xy") and not paths.path_like("")
 
 
+def test_joined_runs() -> None:
+    """Final review item 3 (R36 for free text): runs with `=` and `,` kept, and the text
+    after each `=`, `,` or `:` in one, are candidates too; only the last suffixes are built."""
+    text = "select * from 'mnt/run=1/x.csv' in=a,../r,1/y file:../t:1/z plain=word a=b"
+    assert list(paths.joined_runs(text, paths.Budget())) == [
+        "mnt/run=1/x.csv",
+        "1/x.csv",
+        "in=a,../r,1/y",
+        "a,../r,1/y",
+        "../r,1/y",
+        "1/y",
+        "../t:1/z",
+        "1/z",
+    ]
+    assert list(paths.joined_runs("no path here a=b c,d", paths.Budget())) == []
+    import time
+
+    began = time.perf_counter()
+    huge = list(paths.joined_runs("=" * 1_000_000 + "/x", paths.Budget()))
+    assert time.perf_counter() - began < 2.0
+    assert huge[0] == "=" * 1_000_000 + "/x" and huge[-1] == "/x"
+    assert all(len(run) <= paths.SUFFIX_LIMIT for run in huge[1:])
+    # The same long run many times: each is bounded, the call's budget bounds the total.
+    with pytest.raises(paths.TextTooLarge):
+        list(paths.joined_runs(("a=" * 2000 + "/x ") * 200, paths.Budget()))
+    assert list(paths.suffixes("a=b,c:d", paths.Budget())) == ["b,c:d", "c:d", "d"]
+
+
 def test_fold_is_normalized_after_casefold() -> None:
     """`fold` is NFC(casefold(NFC(x))): casefolding U+01F0 (j with caron) yields the
     decomposed j + U+030C, which fold composes again."""

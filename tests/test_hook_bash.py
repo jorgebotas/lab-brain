@@ -26,7 +26,7 @@ from labbrain.hooks.bash import (
     UNCONFIDENT_MESSAGE,
     check_command,
 )
-from labbrain.hooks.payload import Denial
+from labbrain.hooks.payload import Denial, unchecked_denial
 from labbrain.hooks.scope import Scope, load_scope
 
 SESSION = "00000000-0000-4000-8000-000000000001"
@@ -544,6 +544,17 @@ PUNCT_ROOT_CASES: list[tuple[str, str, str]] = [
     ("r35-env-prefix", "IN=../mnt/run=1/rows.csv python x.py", "deny"),
     ("r35-option-eq-dir", "python x.py --data=../mnt/run=1", "deny"),
     ("r35-option-eq-ok", "python x.py --config=configs/a.yaml --lr=0.1", "allow"),
+    # --- final review item 3: the same in code and text the shell does not split
+    ("f3-duckdb-eq", "duckdb -c \"select * from '../mnt/run=1/rows.csv'\"", "deny"),
+    ("f3-duckdb-comma", "duckdb -c \"select * from '../mnt/run,1/rows.csv'\"", "deny"),
+    ("f3-python-eq", "python -c \"open('../mnt/run=1/rows.csv')\"", "deny"),
+    ("f3-heredoc-eq", "python - <<'EOF'\nopen('../mnt/run=1/rows.csv')\nEOF", "deny"),
+    ("f3-heredoc-comma", "python - <<'EOF'\nx=../mnt/run,1/rows.csv\nEOF", "deny"),
+    ("f3-option-list", "python x.py --in=a,../mnt/run,1/rows.csv", "deny"),
+    ("f3-option-list-eq", "python x.py --in=a,../mnt/run=1/rows.csv", "deny"),
+    ("f3-option-path-list", "python x.py --path=a:../mnt/run:1", "deny"),
+    ("f3-bare-name", "cd ../mnt && python x.py --data=run=1", "deny"),
+    ("f3-ok", "python x.py --in=a,b/c:d --opt=x=y/z 'a=b/c, d:e/f'", "allow"),
     ("r33d-echo-rc-eq", 'python train.py; echo "rc=$?"', "allow"),
     ("r33d-echo-rc-colon", 'python train.py; echo "status:$?"', "allow"),
     ("r33d-echo-flags", 'echo "flags=$-"', "allow"),
@@ -868,7 +879,10 @@ def test_truncated_walk_denies_any_recursion(
     monkeypatch.setattr("labbrain.hooks.exposure.WALK_LIMIT", 3)
     for n in range(5):
         (w.repo / f"f{n}.txt").write_text("")
-    assert w.check("grep -r x .") == Denial("data-guard", UNCONFIDENT_MESSAGE)
+    # Final review item 2: the accurate message, not the unresolved-variable one.
+    assert w.check("grep -r x .") == unchecked_denial("this Bash command")
+    assert "too many files to check for links" in unchecked_denial("x").message
+    assert w.check("python -c 'print(1)'") == unchecked_denial("this Bash command")
     assert w.check("git status") is None
 
 
@@ -959,6 +973,43 @@ def test_huge_commands_are_decided_fast(tmp_path: Path, monkeypatch: pytest.Monk
         assert time.perf_counter() - began < 2.0, command[:40]
     # A big heredoc that names nothing protected is still allowed.
     assert w.check(commands[3], scope) is None
+
+
+@pytest.mark.slow
+def test_equals_words_and_many_bases_deny_fast(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final review item 1: the text after each `=` was copied in full (quadratic), and
+    candidates were resolved again against every base by every rule. Each of these names
+    the root and must deny within a few seconds."""
+    w = make_bash_world(tmp_path, monkeypatch)
+    scope = w.scope()
+    for n in range(63):  # with the cwd, MAX_BASES directories the command could run in
+        (w.repo / f"d{n}").mkdir()
+    dirs = " ".join(f"d{n}" for n in range(63))
+    commands = [
+        "echo " + "=" * 1_000_000 + "{R}/rows.csv",
+        "echo " + "a=" * 500_000 + "{R}/rows.csv",
+        "echo '" + ("a=" * 2000 + "/x ") * 250 + "{R}/rows.csv'",  # one long run, repeated
+        f"ls {dirs} " + " ".join(f"x{n}/y{n}.csv" for n in range(3000)) + " {R}/rows.csv",
+    ]
+    for command in commands:
+        began = time.perf_counter()
+        assert w.check(command, scope) is not None, command[:40]
+        assert time.perf_counter() - began < 5.0, command[:40]
+
+
+def test_many_bases_deny_fast(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Final review item 1, in the default suite: 64 bases and a few hundred candidates."""
+    w = make_bash_world(tmp_path, monkeypatch)
+    scope = w.scope()
+    for n in range(63):
+        (w.repo / f"d{n}").mkdir()
+    dirs = " ".join(f"d{n}" for n in range(63))
+    command = f"ls {dirs} " + " ".join(f"x{n}/y.csv" for n in range(400)) + " {R}/rows.csv"
+    began = time.perf_counter()
+    assert w.check(command, scope) is not None
+    assert time.perf_counter() - began < 3.0
 
 
 def test_lexer_failure_is_unconfident(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

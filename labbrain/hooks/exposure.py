@@ -3,8 +3,8 @@
 A recursive command that follows symlinks reaches a protected root through any link below
 its start directory that points into the root (or into one of the root's ancestors). The
 walk lists such links without following any link itself, skips version-control and
-virtual-environment directories and the protected roots, and stops after `WALK_LIMIT`
-entries: a truncated walk means "unknown", and the caller denies. Results are cached per
+virtual-environment directories and the protected roots, and stops at the first such link
+or after `WALK_LIMIT` entries: a truncated walk means "unknown", and the caller denies. Results are cached per
 session and per start directory under `$CLAUDE_PLUGIN_DATA`. Standard library only.
 """
 
@@ -101,7 +101,6 @@ def _exposes(link: str, targets: Targets) -> bool:
 def _walk(begin: Path, targets: Targets) -> LinkScan:
     root_keys = [fold(root.path) for root in targets.roots]
     root_ids = {i for i in (_identity(root.path) for root in targets.roots) if i is not None}
-    found = False
     seen = 0
     pending = [str(begin)]
     while pending:
@@ -114,10 +113,11 @@ def _walk(begin: Path, targets: Targets) -> LinkScan:
         for entry in entries:
             seen += 1
             if seen > WALK_LIMIT:
-                return LinkScan(found, True)
+                return LinkScan(False, True)
             try:
                 if entry.is_symlink():
-                    found = found or _exposes(entry.path, targets)
+                    if _exposes(entry.path, targets):
+                        return LinkScan(True, False)  # one is enough (final review item 10)
                 elif entry.is_dir(follow_symlinks=False) and entry.name not in SKIP_DIRS:
                     st = entry.stat(follow_symlinks=False)
                     if fold(entry.path) in root_keys or (st.st_dev, st.st_ino) in root_ids:
@@ -125,7 +125,7 @@ def _walk(begin: Path, targets: Targets) -> LinkScan:
                     pending.append(entry.path)
             except OSError:
                 continue
-    return LinkScan(found, False)
+    return LinkScan(False, False)
 
 
 def links_under(start: Path, targets: Targets, cache_dir: Path | None, session_id: str) -> LinkScan:

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -304,3 +306,55 @@ def test_cli_hook_closed_stderr_still_exits_2(tmp_path: Path) -> None:
     finally:
         os.close(write_end)
     assert (proc.returncode, proc.stdout) == (2, b"")
+
+
+def test_pre_deadline_denies_a_slow_check(tmp_path: Path) -> None:
+    """Final review item 1(c): a pre-tool-use check that runs past PRE_DEADLINE_S exits 2
+    with the fixed message, well before Claude Code's own hook timeout."""
+    probe = (
+        "import sys, time\n"
+        "from labbrain.hooks import entry, guard\n"
+        "entry.PRE_DEADLINE_S = 0.3\n"
+        "def slow(*_):\n"
+        "    print('SECRET', file=sys.stderr)\n"
+        "    time.sleep(30)\n"
+        "guard.check_tool = slow\n"
+        "from labbrain.cli import main\n"
+        "sys.exit(main(['hook', 'pre-tool-use']))\n"
+    )
+    began = time.perf_counter()
+    proc = subprocess.run(
+        [sys.executable, "-c", probe],
+        input=hook_payload("bash", cwd=tmp_path, command="ls"),
+        cwd=tmp_path,
+        env=clean_env(),
+        capture_output=True,
+        timeout=60,
+    )
+    assert time.perf_counter() - began < 15
+    assert (proc.returncode, proc.stdout, proc.stderr.decode()) == (2, b"", PRE_FAILED + "\n")
+
+
+def test_pre_deadline_is_disarmed_after_the_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The timer and the previous SIGALRM handler are restored; other events never arm it."""
+    if not hasattr(signal, "setitimer"):
+        pytest.skip("no interval timers on this platform")
+    assert entry.PRE_DEADLINE_S == 60
+    before = signal.getsignal(signal.SIGALRM)
+    seen: list[float] = []
+
+    def spy(*_: Any) -> None:
+        seen.append(signal.getitimer(signal.ITIMER_REAL)[0])
+
+    monkeypatch.setattr(guard, "check_tool", spy)
+    code, _, _ = run_hook("pre-tool-use", hook_payload("read", cwd=tmp_path, path="/f"), {})
+    assert code == 0
+    assert seen and 0 < seen[0] <= 60
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+    assert signal.getsignal(signal.SIGALRM) == before
+    seen.clear()
+    monkeypatch.setattr(post, "post_tool_use", lambda *_: (spy(), (0, ""))[1])
+    run_hook("post-tool-use", hook_payload("post_write", cwd=tmp_path, path="/f"), {})
+    assert seen == [0.0]

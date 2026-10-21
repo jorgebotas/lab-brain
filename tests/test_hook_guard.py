@@ -14,7 +14,7 @@ from helpers import MIN_CONFIG, hook_payload, make_vault, write
 
 from labbrain.hooks import bash, exposure, guard
 from labbrain.hooks.entry import run_hook
-from labbrain.hooks.payload import Denial, Payload, parse_payload
+from labbrain.hooks.payload import Denial, Payload, parse_payload, unchecked_denial
 from labbrain.hooks.scope import Scope, load_scope
 
 BROKEN = (
@@ -45,6 +45,10 @@ class World:
     @property
     def configured(self) -> str:
         return str(self.phi)
+
+
+# `entry` for a denial with no root implicated: the "cannot be checked safely here" message.
+UNCHECKED = (0, "")
 
 
 def protected_config(*entries: Path | str, protected: bool = True) -> str:
@@ -98,7 +102,10 @@ def assert_clean(w: World, denial: Denial, entry: tuple[int, str]) -> None:
     assert "rows.csv" not in message
     assert str(w.rows) not in message and str(w.rows.resolve()) not in message
     assert "\n" not in message
-    if denial.rule == "data-guard":
+    if denial.rule == "data-guard" and entry == UNCHECKED:
+        assert message == unchecked_denial(message.split(" cannot be checked")[0][22:]).message
+        assert "protected data path" not in message
+    elif denial.rule == "data-guard":
         n, configured = entry
         assert f"protected data path #{n} ('{configured}')" in message
         assert message.startswith("lab-brain data guard: this ")
@@ -151,8 +158,8 @@ def test_read_outside_root_allowed(world: World) -> None:
 
 
 def test_unconfident_path_denied(world: World) -> None:
-    denied(world, "Read", {"file_path": str(world.vault / "a\0b")})
-    denied(world, "Read", {"file_path": ["not", "a", "string"]})
+    denied(world, "Read", {"file_path": str(world.vault / "a\0b")}, entry=UNCHECKED)
+    denied(world, "Read", {"file_path": ["not", "a", "string"]}, entry=UNCHECKED)
 
 
 def test_unknown_user_is_a_relative_name(world: World) -> None:
@@ -238,7 +245,9 @@ def test_glob_star_star_from_ancestor_denied(world: World) -> None:
     denied(world, "Glob", {"pattern": "../**", "path": str(world.vault)})
     denied(world, "Glob", {"pattern": "{phi,x}/*.csv", "path": str(world.tmp)})
     denied(world, "Glob", {"pattern": "@(phi)/rows.csv", "path": str(world.tmp)})
-    denied(world, "Glob", {"pattern": "*/../phi/rows.csv", "path": str(world.vault)})
+    denied(
+        world, "Glob", {"pattern": "*/../phi/rows.csv", "path": str(world.vault)}, entry=UNCHECKED
+    )
 
 
 def test_glob_shallow_from_ancestor_allowed(world: World) -> None:
@@ -286,13 +295,15 @@ def test_glob_recursive_bases(world: World) -> None:
     # ripgrep reads a leading `!` as an exclusion, listing everything else; `\` escapes.
     for path in (tmp, world.vault):
         for pattern in ("!nothing/here", "!/x", "!*.md", "notes/!x/*", "notes\\*.md", "\\!x"):
-            denied(world, "Glob", {"pattern": pattern, "path": str(path)})
+            denied(world, "Glob", {"pattern": pattern, "path": str(path)}, entry=UNCHECKED)
     allowed(world, "Glob", {"pattern": "notes/x!/*.md"})  # `!` not leading a component
     assert guard.MAX_GLOB_NAMES == 16  # ruling R23
     deep = "/".join(f"d{n}" for n in range(16))
     allowed(world, "Glob", {"pattern": f"{deep}/*.md"})
-    denied(world, "Glob", {"pattern": f"{deep}/d/*.md"})  # too many literal directories: unsure
-    denied(world, "Glob", {"pattern": f"{world.vault}/{deep}/x"})  # absolute: counted the same
+    too_deep = {"pattern": f"{deep}/d/*.md"}
+    denied(world, "Glob", too_deep, entry=UNCHECKED)  # too many literal directories: unsure
+    absolute = {"pattern": f"{world.vault}/{deep}/x"}
+    denied(world, "Glob", absolute, entry=UNCHECKED)  # absolute: counted the same
 
 
 def test_glob_and_grep_link_exposure(world: World) -> None:
@@ -326,8 +337,12 @@ def test_glob_and_grep_link_walk_cached(world: World) -> None:
 
 def test_glob_and_grep_truncated_walk_denied(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(exposure, "WALK_LIMIT", 1)
-    denied(world, "Glob", {"pattern": "**/*.md"})
-    denied(world, "Grep", {"pattern": "x"})
+    # Final review item 2: no root is implicated, so the message does not name one.
+    d = denied(world, "Glob", {"pattern": "**/*.md"}, entry=UNCHECKED)
+    assert d == unchecked_denial("this Glob call")
+    assert denied(world, "Grep", {"pattern": "x"}, entry=UNCHECKED) == unchecked_denial(
+        "this Grep call"
+    )
 
 
 # --- Bash routing -------------------------------------------------------------------------
@@ -373,8 +388,9 @@ def test_mcp_caps(world: World) -> None:
     deep: Any = str(world.rows)
     for _ in range(25):
         deep = [deep]
-    denied(world, "mcp__x__y", {"a": deep})  # too deep to walk: unconfident
-    denied(world, "mcp__x__y", {"a": [str(i) for i in range(2500)]})  # too many strings
+    denied(world, "mcp__x__y", {"a": deep}, entry=UNCHECKED)  # too deep to walk: unconfident
+    many = [str(i) for i in range(2500)]
+    denied(world, "mcp__x__y", {"a": many}, entry=UNCHECKED)  # too many strings
     long = "x" * 5000 + f" {world.rows}"
     denied(world, "mcp__x__y", {"a": long})  # the textual net sees the whole string
 
@@ -531,13 +547,14 @@ def test_home_relative_root(world: World, monkeypatch: pytest.MonkeyPatch) -> No
     denied(world, "Glob", {"pattern": "/d*", "path": str(world.home)}, entry=entry)  # from `/`
     allowed(world, "Glob", {"pattern": "*/*.csv", "path": str(world.home / "other")})
     allowed(world, "Glob", {"pattern": "~/other/*.py"}, cwd=world.vault)
-    denied(world, "Glob", {"pattern": f"~nosuchuser{secrets.token_hex(4)}/*"}, entry=entry)
+    unknown = f"~nosuchuser{secrets.token_hex(4)}/*"
+    denied(world, "Glob", {"pattern": unknown}, entry=UNCHECKED)
     for tool, args in (
         ("Glob", {"path": str(world.home)}),
         ("Grep", {"pattern": "x", "glob": ["*.md"]}),
         ("Bash", {}),
     ):
-        denied(world, tool, args, entry=entry)  # malformed arguments are unsure
+        denied(world, tool, args, entry=UNCHECKED)  # malformed arguments are unsure
 
 
 def test_through_run_hook(world: World) -> None:
@@ -654,6 +671,28 @@ def test_mcp_embedded_relative_path_denied(world: World) -> None:
     assert guard.PATHLIKE.findall("a '../phi/x' b=~/y c(./z)") == ["../phi/x", "~/y", "./z"]
 
 
+def test_mcp_punctuated_roots_denied(world: World) -> None:
+    """Final review item 3: roots whose names hold `=`, `,` or `:` (Hive-style partitions),
+    named relative in free text, after a prefix, or in a list."""
+    names = ("run=1", "run,1", "run:1")
+    for name in names:
+        write(world.tmp / "mnt" / name, "rows.csv", "x\n")
+    config = world.vault / ".labbrain" / "config.yaml"
+    roots = [world.phi, *(world.tmp / "mnt" / name for name in names)]
+    config.write_text(protected_config(*roots))
+    for n, name in enumerate(names, start=2):
+        entry = (n, str(world.tmp / "mnt" / name))
+        for text in (
+            f"select * from '../mnt/{name}/rows.csv'",
+            f"read_csv(../mnt/{name}/rows.csv)",
+            f"in=a,../mnt/{name}/rows.csv",
+            f"file:../mnt/{name}",
+            f"paths=a:../mnt/{name}/rows.csv",
+        ):
+            denied(world, "mcp__db__q", {"sql": text}, entry=entry)
+    allowed(world, "mcp__db__q", {"sql": "select a=b, c from 'notes/n.md' where x:1"})
+
+
 def test_mcp_over_length_path_denied(world: World) -> None:
     (world.vault / "linked").symlink_to(world.phi, target_is_directory=True)
     (world.phi / "sub").mkdir()
@@ -666,15 +705,18 @@ def test_mcp_over_length_path_denied(world: World) -> None:
         pad + "linked/../phi/rows.csv",
         pad + "lnksub/../rows.csv",
     ):
-        denied(world, "mcp__fs__read", {"path": path})
-        denied(world, "mcp__db__q", {"sql": f"SELECT * FROM '{path}'"})  # embedded too
+        entry = UNCHECKED if ".." in path else None  # a long `..` path is unsure
+        denied(world, "mcp__fs__read", {"path": path}, entry=entry)
+        denied(world, "mcp__db__q", {"sql": f"SELECT * FROM '{path}'"}, entry=entry)
     # Still over the cap once normalised, and path-like: unsure.
-    denied(world, "mcp__fs__read", {"path": "/".join(["d" * 200] * 30)})
+    denied(world, "mcp__fs__read", {"path": "/".join(["d" * 200] * 30)}, entry=UNCHECKED)
     allowed(world, "mcp__fs__read", {"text": "word " * 2000})  # long, but nothing path-like
     allowed(world, "mcp__fs__read", {"path": "./" * 3000 + "notes/n.md"})
-    denied(world, "mcp__fs__read", {"path": "./" * 3000 + "notes/../notes/n.md"})  # `..`: unsure
+    unsure = "./" * 3000 + "notes/../notes/n.md"
+    denied(world, "mcp__fs__read", {"path": unsure}, entry=UNCHECKED)  # `..`: unsure
     # Too many distinct path-like substrings to check in one call: unsure.
-    denied(world, "mcp__fs__read", {"text": " ".join(f"a{i}.md" for i in range(6000))})
+    many = {"text": " ".join(f"a{i}.md" for i in range(6000))}
+    denied(world, "mcp__fs__read", many, entry=UNCHECKED)
     allowed(world, "mcp__fs__read", {"text": " ".join(f"a{i}.md" for i in range(1000))})
 
 

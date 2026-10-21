@@ -9,6 +9,7 @@ Messages never quote a candidate path, a file name or file contents.
 
 from __future__ import annotations
 
+import itertools
 import os
 import pwd
 import re
@@ -19,9 +20,18 @@ from typing import Any
 from labbrain.hooks import bash
 from labbrain.hooks.exposure import links_under
 from labbrain.hooks.paths import PATHLIKE as PATHLIKE  # re-exported for callers of guard
-from labbrain.hooks.paths import ProtectedRoot, fold, path_runs, readings, sticky_pieces
+from labbrain.hooks.paths import (
+    Budget,
+    ProtectedRoot,
+    TextTooLarge,
+    fold,
+    joined_runs,
+    path_runs,
+    readings,
+    sticky_pieces,
+)
 from labbrain.hooks.paths import canonical as canonical  # re-exported for callers of guard
-from labbrain.hooks.payload import Denial, Payload, data_denial
+from labbrain.hooks.payload import Denial, Payload, data_denial, unchecked_denial
 from labbrain.hooks.scope import Scope, VaultInfo
 
 SKIP_TOOLS: frozenset[str] = frozenset(
@@ -87,9 +97,11 @@ def check_tool(payload: Payload, scope: Scope) -> Denial | None:
     try:
         return _check(payload, scope, subject)
     except _Unsure:
-        roots = scope.targets.roots
-        # No known root means the scope is protected only by a broken vault.
-        return data_denial(roots[0], subject) if roots else Denial("config", BROKEN_CONFIG_MESSAGE)
+        # No known root means the scope is protected only by a broken vault. Otherwise no
+        # particular root is implicated (final review item 2): say so, not "path #1".
+        if not scope.targets.roots:
+            return Denial("config", BROKEN_CONFIG_MESSAGE)
+        return unchecked_denial(subject)
 
 
 def _reads_broken_config(payload: Payload, broken: Iterable[VaultInfo]) -> bool:
@@ -352,16 +364,20 @@ def _any_tool(args: dict[str, Any], cwd: Path, scope: Scope, subject: str) -> De
     is searched for a root's spelling. A candidate that is a guard file denies (R11)."""
     spellings = _all_spellings(scope)
     candidates: set[str] = set()
+    budget = Budget()
     for text in _strings(args):
         root = _named(text, spellings)
         if root is not None:
             return data_denial(root, subject)
         candidates.add(text)
-        for token in path_runs(text):
-            candidates.add(token)
-            candidates.update(sticky_pieces(token))
-        if len(candidates) > MAX_CANDIDATES:
-            raise _Unsure
+        try:  # R36, final review item 3: runs `=` and `,` would cut, and what follows marks
+            for token in itertools.chain(path_runs(text), joined_runs(text, budget)):
+                candidates.add(token)
+                candidates.update(sticky_pieces(token))
+                if len(candidates) > MAX_CANDIDATES:
+                    raise _Unsure
+        except TextTooLarge:
+            raise _Unsure from None
     paths = [path for text in candidates for path in _paths(text, cwd, scope.env)]
     for path in paths:
         root = scope.targets.containing(path)

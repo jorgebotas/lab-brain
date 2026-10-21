@@ -31,14 +31,19 @@ from pathlib import Path
 from labbrain.hooks.exposure import links_under
 from labbrain.hooks.paths import (
     STICKY,
+    Budget,
     ProtectedRoot,
+    TextTooLarge,
     canonical,
     fold,
+    loose_runs,
     path_runs,
     readings,
+    spellings,
     sticky_pieces,
+    suffixes,
 )
-from labbrain.hooks.payload import Denial, data_denial
+from labbrain.hooks.payload import Denial, data_denial, unchecked_denial
 from labbrain.hooks.scope import ENV_PLUGIN_ROOT, Scope
 
 SUBJECT = "this Bash command"
@@ -295,6 +300,7 @@ MAX_BRACE_GROUPS = 16
 PATH_LIMIT = 4096  # longer candidates cannot be opened as paths (ENAMETOOLONG)
 LEX_LIMIT = 64 * 1024  # shlex is quadratic on long tokens; longer text uses _tokenize
 GLOB_LIMIT = 2_000
+MAX_READINGS = 10_000  # distinct (candidate, base) pairs resolved in one command (item 1)
 GIT_TIMEOUT = 5.0
 
 # ------------------------------------------------------------------------------- lexing
@@ -370,6 +376,11 @@ _DQUOTE_END = re.compile(r'[\\"]')
 
 class _Unconfident(Exception):
     """The command cannot be analysed within the bounds; deny as unconfident."""
+
+
+class _TooLarge(_Unconfident):
+    """A size bound was hit (candidates, bases, glob matches, readings): the command is
+    denied with the "cannot be checked safely here" message, not the unconfident one."""
 
 
 @dataclass
@@ -1013,6 +1024,44 @@ class _Check:
         self.folded = fold(command)
         root = scope.env.get(ENV_PLUGIN_ROOT)
         self.plugin_root = canonical(root, self.home) if root else None
+        # Final review item 1(b): every rule resolves the same candidates against the same
+        # bases, so readings, containment and directory tests are computed once per call.
+        self._readings_of: dict[tuple[str, Path], list[Path]] = {}
+        self._root_of: dict[Path, ProtectedRoot | None] = {}
+        self._dir_of: dict[Path, bool] = {}
+        self._names_of: dict[Path, tuple[Path, ...]] = {}
+        self.budget = Budget()  # suffix text built by `_pieces` (R36)
+
+    def _read(self, text: str, base: Path) -> list[Path]:
+        """`paths.readings`, memoized for this call."""
+        key = (text, base)
+        found = self._readings_of.get(key)
+        if found is None:
+            if len(self._readings_of) >= MAX_READINGS:
+                raise _TooLarge
+            found = self._readings_of[key] = readings(text, base)
+        return found
+
+    def _names(self, path: Path) -> tuple[Path, ...]:
+        found = self._names_of.get(path)
+        if found is None:
+            found = self._names_of[path] = spellings(path)
+        return found
+
+    def _root(self, path: Path) -> ProtectedRoot | None:
+        """`Targets.containing`, memoized for this call."""
+        if path not in self._root_of:
+            self._root_of[path] = self.targets.containing(path, self._names(path))
+        return self._root_of[path]
+
+    def _guards(self, path: Path) -> bool:
+        return self.targets.is_guard_file(path, self._names(path))
+
+    def _is_dir(self, path: Path) -> bool:
+        found = self._dir_of.get(path)
+        if found is None:
+            found = self._dir_of[path] = path.is_dir()
+        return found
 
     # ------------------------------------------------------------------ parsing
 
@@ -1249,16 +1298,19 @@ class _Check:
 
     def _pieces(self, text: str) -> Iterator[tuple[str, bool]]:
         """`text` brace-expanded, then split at = : , and glued short options, and the text
-        after each `=` (round 5: `--input=` a root named `run=1`): (piece, is the whole)."""
+        after each `=`, `,` or `:` (R36: `--input=` a root named `run=1`): (piece, is the
+        whole)."""
         for whole in _braces(text):
             yield self._tilde(_short(whole, True)), True
             pieces = _PIECE_SPLIT.split(whole)
             for piece in pieces[1:] if len(pieces) > 1 else ():
                 yield self._tilde(_short(piece, False)), False
-            at = whole.find("=")
-            while at >= 0:
-                yield self._tilde(_short(whole[at + 1 :], False)), False
-                at = whole.find("=", at + 1)
+            # The text after each `=`, `,` or `:` (R36; `,` and `:` from final review item 3).
+            # Item 1(a): only suffixes within SUFFIX_LIMIT are built, since a longer one
+            # cannot be opened, and a wildcard leading it is still seen in the piece split
+            # above that starts at the same mark.
+            for rest in suffixes(whole, self.budget):
+                yield self._tilde(_short(rest, False)), False
             glued = _GLUED_OPTION.match(whole)
             if glued:
                 yield self._tilde(_short(whole[glued.end() :], False)), False
@@ -1278,7 +1330,7 @@ class _Check:
                 return
             self.seen.add((text, candidate.whole))
         if len(self.candidates) >= MAX_CANDIDATES:
-            raise _Unconfident
+            raise _TooLarge
         self.candidates.append(candidate)
         if candidate.simple is not None:
             self.seen.add((text, candidate.whole))
@@ -1292,7 +1344,9 @@ class _Check:
                             self._add(_Candidate(piece, s, w, whole))
         exempt_runs = sum(len(simple.exempt) for simple in self.simples)
         for body, bindings in self.raw:
-            for run in path_runs(body):
+            # R36, final review item 3: runs that `=` and `,` would cut, whole; `_pieces`
+            # adds the text after each mark.
+            for run in itertools.chain(path_runs(body), loose_runs(body)):
                 for alternative in map(_params, self._expand(run, bindings)):
                     for piece, whole in self._pieces(alternative):
                         if not piece:
@@ -1305,7 +1359,7 @@ class _Check:
     def _is_plugin_root(self, text: str) -> bool:
         if self.plugin_root is None or WILD in text or not text.startswith("/"):
             return False
-        return all(r == self.plugin_root for r in readings(text, Path("/")))
+        return all(r == self.plugin_root for r in self._read(text, Path("/")))
 
     def _exempt(self, candidate: _Candidate) -> bool:
         """The exact `--from` value after `uvx`, when it is the plugin root."""
@@ -1345,10 +1399,10 @@ class _Check:
                     if WILD in place or any(c in _GLOB_CHARS for c in place):
                         pattern = place.replace(WILD, "*")
                         for match in itertools.islice(glob.iglob(pattern), MAX_BASES + 1):
-                            for reading in readings(match, base):
+                            for reading in self._read(match, base):
                                 self._add_base(reading)
                     else:
-                        for reading in readings(place, base):
+                        for reading in self._read(place, base):
                             self._add_base(reading)
             for candidate in self.candidates:
                 if not candidate.whole or WILD in candidate.text:
@@ -1356,20 +1410,20 @@ class _Check:
                 if any(c in _GLOB_CHARS for c in candidate.text):
                     continue
                 for base in list(self.bases):
-                    for path in readings(candidate.text, base):
-                        if path.is_dir():
+                    for path in self._read(candidate.text, base):
+                        if self._is_dir(path):
                             self._add_base(path)
 
     def _add_base(self, path: Path) -> None:
         if path not in self.bases:
             if len(self.bases) >= MAX_BASES:
-                raise _Unconfident
+                raise _TooLarge
             self.bases.append(path)
 
     def resolved(self, candidate: _Candidate) -> list[Path]:
         """Both readings (ruling R22) of the candidate against every base."""
         bases = [Path("/")] if candidate.text.startswith("/") else self.bases
-        return [r for base in bases for r in readings(candidate.text, base)]
+        return [r for base in bases for r in self._read(candidate.text, base)]
 
     # -------------------------------------------------------------------- rules
 
@@ -1396,7 +1450,7 @@ class _Check:
             or (view.name == "rsync" and any(a.startswith("--delete") for a in simple.args(view)))
         }
         for candidate, path in self._literal_paths():
-            if self.targets.is_guard_file(path):
+            if self._guards(path):
                 return guard
             if candidate.simple in replacers and self._guard_below(path):
                 return guard
@@ -1407,7 +1461,7 @@ class _Check:
             bases = [Path("/")] if text.startswith("/") else self.bases
             for base in bases:
                 prefix, _ = _split_pattern(self._absolute(text, base))
-                if any(self.targets.is_guard_file(r) for r in readings(prefix, base)):
+                if any(self._guards(r) for r in self._read(prefix, base)):
                     return guard
         return None
 
@@ -1436,14 +1490,14 @@ class _Check:
             pattern = self._absolute(candidate.text, base).replace(WILD, "*")
             for spelling in dict.fromkeys([pattern, os.path.normpath(pattern)]):
                 for match in itertools.islice(glob.iglob(spelling), GLOB_LIMIT + 1):
-                    matches.extend(readings(match, base))
+                    matches.extend(self._read(match, base))
                     if len(matches) > GLOB_LIMIT:
-                        raise _Unconfident
+                        raise _TooLarge
         return matches
 
     def data_rules(self) -> Denial | None:
         roots = self.targets.roots
-        inside = self.targets.containing(self.cwd)
+        inside = self._root(self.cwd)
         if inside is not None:
             return data_denial(inside, SUBJECT)
         if self.dangerous:
@@ -1454,7 +1508,7 @@ class _Check:
             first = candidate.text.lstrip("/").split("/", 1)[0]
             if WILD in first:
                 return Denial("data-guard", UNCONFIDENT_MESSAGE)
-        hits = [self.targets.containing(path) for _, path in self._literal_paths()]  # rule 4
+        hits = [self._root(path) for _, path in self._literal_paths()]  # rule 4
         found = [root for root in hits if root is not None]
         if found:  # the most specific root names the entry best
             return data_denial(max(found, key=lambda root: len(str(root.path))), SUBJECT)
@@ -1518,9 +1572,9 @@ class _Check:
             if "**" in text:  # a recursive glob, which zsh's `***` even follows
                 for base in bases:
                     prefix, _ = _split_pattern(self._absolute(text, base))
-                    self.extra_starts.extend(readings(prefix, base))
+                    self.extra_starts.extend(self._read(prefix, base))
             for match in self._glob(candidate):
-                root = self.targets.containing(match)
+                root = self._root(match)
                 if root is not None:
                     return data_denial(root, SUBJECT)
         return None
@@ -1530,8 +1584,8 @@ class _Check:
         if ".." in rest:
             return Denial("data-guard", UNCONFIDENT_MESSAGE)
         rest = [part for part in rest if part not in ("", ".")]
-        for start in readings(prefix, Path("/")):
-            root = self.targets.containing(start)
+        for start in self._read(prefix, Path("/")):
+            root = self._root(start)
             if root is not None:
                 return data_denial(root, SUBJECT)
             start_key = fold(start).rstrip(os.sep)
@@ -1555,8 +1609,8 @@ class _Check:
             for candidate in mine:
                 bases = [Path("/")] if candidate.text.startswith("/") else [*self.bases, *places]
                 for base in bases:
-                    for path in readings(candidate.text, base):
-                        root = self.targets.containing(path)
+                    for path in self._read(candidate.text, base):
+                        root = self._root(path)
                         under = self.targets.under(path)
                         if root is not None or under:
                             return data_denial(root or under[0], SUBJECT)
@@ -1591,7 +1645,7 @@ class _Check:
             for start in dict.fromkeys(starts):
                 scan = links_under(start, self.targets, cache, self.session_id)
                 if scan.truncated:
-                    return Denial("data-guard", UNCONFIDENT_MESSAGE)
+                    return unchecked_denial(SUBJECT)
                 if scan.found and following:
                     return data_denial(self.targets.roots[0], SUBJECT)
         return None
@@ -1608,7 +1662,7 @@ class _Check:
                 paths = self._glob(candidate)
             else:
                 paths = self.resolved(candidate)
-            dirs.extend(p for p in paths if p.is_dir() and p not in dirs)
+            dirs.extend(p for p in paths if self._is_dir(p) and p not in dirs)
         return dirs
 
     def _rg_ignores(self, args: Sequence[str], start: Path, roots: list[ProtectedRoot]) -> bool:
@@ -1851,5 +1905,7 @@ def check_command(
         return Denial("data-guard", UNCONFIDENT_MESSAGE)
     try:
         return _Check(command, cwd, scope, env, session_id).run()
+    except (_TooLarge, TextTooLarge):
+        return unchecked_denial(SUBJECT)
     except (_Unconfident, OSError, RuntimeError, ValueError, RecursionError):
         return Denial("data-guard", UNCONFIDENT_MESSAGE)

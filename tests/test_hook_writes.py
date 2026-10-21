@@ -175,6 +175,24 @@ def test_handoff_committed_frozen_on_existence(vault: Path) -> None:
     )
 
 
+def test_frozen_guard_git_runs_hardened(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Final review item 9: every git command of the frozen guard disables fsmonitor and
+    git hooks."""
+    from labbrain import gitutil
+
+    calls: list[list[str]] = []
+    real = subprocess.run
+
+    def run(argv: list[str], *args: object, **kwargs: object) -> object:
+        calls.append(list(argv))
+        return real(argv, *args, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(gitutil.subprocess, "run", run)
+    test_protocol_referenced_by_done_experiment_frozen(vault)
+    assert calls
+    assert all(argv[:5] == ["git", *gitutil.HOOK_GIT_OPTIONS] for argv in calls)
+
+
 def test_uncommitted_new_handoff_editable(vault: Path) -> None:
     # The skills' flow: `labbrain new` writes the note, then the agent fills in fields.
     rel = "handoffs/HO-20261020-0900-claude.md"

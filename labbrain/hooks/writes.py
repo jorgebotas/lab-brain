@@ -259,7 +259,7 @@ def frozen_bases(vault: Path, rel: str) -> list[tuple[Note, Policy]]:
     from labbrain import gitutil
     from labbrain.frozen import POLICIES, DoneProtocolsAtBase, frozen_at_base, parse_blob
 
-    repo = gitutil.open_repo(vault)
+    repo = gitutil.open_repo(vault, hook=True)
     if repo is None:
         return []
     head = gitutil.resolve_ref(repo, "HEAD")

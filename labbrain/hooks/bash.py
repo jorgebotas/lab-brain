@@ -28,6 +28,7 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from labbrain.gitutil import HOOK_GIT_OPTIONS
 from labbrain.hooks.exposure import links_under
 from labbrain.hooks.paths import (
     STICKY,
@@ -1684,7 +1685,7 @@ class _Check:
         output goes nowhere: inherited descriptors would reach Claude."""
         try:
             result = subprocess.run(
-                ["git", "-C", str(start), "check-ignore", "-q", str(root.path)],
+                ["git", *HOOK_GIT_OPTIONS, "-C", str(start), "check-ignore", "-q", str(root.path)],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,

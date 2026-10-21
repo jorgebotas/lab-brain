@@ -897,6 +897,24 @@ def test_gitignore_check_needs_git(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert w.check("rg x", scope) is not None
 
 
+def test_check_ignore_runs_hardened(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Final review item 9: `git check-ignore` disables fsmonitor and git hooks."""
+    w = make_bash_world(tmp_path, monkeypatch, gitignored=True)
+    scope = w.scope()
+    calls: list[list[str]] = []
+    real = bash.subprocess.run
+
+    def run(argv: list[str], *args: object, **kwargs: object) -> object:
+        calls.append(list(argv))
+        return real(argv, *args, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(bash.subprocess, "run", run)
+    assert w.check("rg x", scope) is None
+    assert calls
+    options = ["-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null"]
+    assert all(argv[:5] == ["git", *options] for argv in calls)
+
+
 def test_subprocess_output_never_reaches_fds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
 ) -> None:

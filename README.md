@@ -32,20 +32,22 @@ The plugin also installs four Claude Code hooks. They run the same engine throug
 - **Data guard** (before every tool call): in a vault with `protected_data: true`, blocks any
   tool call that names a `data_paths` entry, or searches into one, whether through Read, Glob,
   Grep, an MCP tool or a Bash command.
-- **Frozen-file guard** (before writes): blocks rewrites of frozen notes, existing `raw/`
-  files and manuscripts outside `manuscripts/_proposals/`. Notes not yet committed stay
-  editable.
-- **Write validator** (before and after writes): in a protected vault, blocks content that
-  matches a PHI pattern before it is written; after each write, shows schema errors to the
-  agent so it fixes them.
+- **Frozen-file guard** (before file-tool writes): blocks rewrites of frozen notes, existing
+  `raw/` files and manuscripts outside `manuscripts/_proposals/`. Notes not yet committed
+  stay editable.
+- **Write validator** (before and after file-tool writes): in a protected vault, blocks
+  content that matches a PHI pattern before it is written; after each write, shows schema
+  errors to the agent so it fixes them. Writes made through Bash or MCP tools are not
+  checked here; lint and pre-commit catch them.
 - **Session brief** (session start): regenerates `index.md` and adds the short brief to the
   session.
 
 The guard fails closed. If the engine cannot start, `uv` is missing, the input is malformed
 or the vault config does not load, the call is blocked. With a broken config the agent may
 only read `.labbrain/`, so it can tell you what is wrong. The hooks never approve a call:
-your own permission prompts still apply. Claude Code 2.1.295 or later is recommended, because
-older versions let a call proceed when a hook times out.
+your own permission prompts still apply. A call the guard cannot decide within 60 seconds is
+blocked. Claude Code 2.1.295 or later is still recommended, because older versions let a call
+proceed when a hook times out.
 
 What this means in practice:
 
@@ -57,8 +59,9 @@ What this means in practice:
   `python train.py /data/rows.csv`.
 - **Search a narrower folder.** A recursive search (`grep -r`, `find`, Glob, Grep) from a
   folder that contains a data path is refused. `rg` from a code repo whose data folder is
-  gitignored is allowed. In a protected vault, a Glob or Grep from a folder with more than
-  20,000 entries, or from `/` or `~`, is refused too.
+  gitignored is allowed. In a protected vault, a Glob, a Grep, a recursive Bash command or
+  inline code (`python -c`, `duckdb -c` and the like) run from a folder with more than 20,000
+  entries, or from `/` or `~`, is refused too: the guard cannot check it for links.
 - **Commit messages** go through `git commit -m "$(cat <<'EOF' … EOF)"` or `git commit -F`;
   other command substitutions can stand for any path, so they may be blocked.
 
@@ -66,15 +69,18 @@ Known gaps: the guard reads command text, so it cannot see what a program opens 
 (by design: training runs read data), nor obfuscated or encoded paths, paths built inside
 inline code, or hard links. Also not caught:
 
-- MCP tools that write vault files bypass the frozen-file guard, the PHI pre-scan and the
-  post-write validator; lint and pre-commit catch them at commit.
+- Writes made through Bash (`>>`, `sed -i`, `tee` and the like) or through MCP tools bypass
+  the frozen-file guard, the PHI pre-scan and the post-write validator; lint and pre-commit
+  catch them at commit.
+- Git commands that rewrite the working tree (`git checkout <rev> -- .`, `git stash`,
+  `git reset`) can change `.labbrain/config.yaml` without naming it.
+- Shell code fed to a shell through stdin in unusual forms is not fully analysed.
+- Percent-encoded or `file://` URL spellings of a data path are not decoded.
 - `git -C` or `--git-dir` with a pre-written repository config can run code.
 - `RIPGREP_CONFIG_PATH` could add `--follow` to `rg` (mitigated by the link walk).
 
-Frozen notes edited through Bash are caught by lint and pre-commit, not by the hooks. For a
-stronger boundary, Claude Code's
-OS-level Bash sandbox can deny reads of the data paths, at the cost of blocking training runs
-in the session.
+For a stronger boundary, Claude Code's OS-level Bash sandbox can deny reads of the data
+paths, at the cost of blocking training runs in the session.
 
 These guardrails make the safe path the default. They do not replace your institution's DUA,
 IRB or security rules.

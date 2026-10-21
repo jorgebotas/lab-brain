@@ -154,6 +154,7 @@ For writes, the frozen-file guard and validator use the vault that contains the 
 - **Every other tool, including `mcp__*`:** every string value in `tool_input` (walked recursively, size-capped) is a path candidate:
   - absolute and `~` candidates are resolved directly;
   - relative candidates are resolved against cwd;
+  - runs that `=` and `,` would cut are candidates whole, and so is the text after each `=`, `,` or `:` of a run, as for Bash (ruling R36);
   - plus the textual net below.
 
 **Bash rules.** All rules over-approximate. Any rule firing denies.
@@ -164,12 +165,13 @@ For writes, the frozen-file guard and validator use the vault that contains the 
      - every word;
      - every path-like substring of the raw command text (runs containing `/` or starting with `~` or `.`);
      - the path-like pieces of each token split on `: [ ] { } @ ! $ % ^ * + ?` (ruling R17), so `file:../x` and `[../x]` count. The extra split applies only to text with no wildcard, so rules 2 and 5 still see the whole token. MCP strings get the same split.
+     - the text after each `=`, `,` or `:` of a word or raw-text run, and raw-text runs with `=` and `,` kept whole (ruling R36), because a root may be named like a Hive partition (`run=1`). Only suffixes short enough to be opened as a path are built, and a per-call budget bounds the total.
    - Scanning the raw text also covers heredoc bodies and the code inside `python -c`, `node -e`, `duckdb -c` and similar.
 2. **Expansion.**
    - Expand `~`, `~user`, `$HOME`/`${HOME}`, and variables assigned earlier in the same command (`X=/p; cat $X/f`).
    - Expand other variables from the hook's environment.
    - A for-loop variable stands for the loop's words, which are candidates in their own right.
-   - Special and positional parameters (`$?`, `$#`, `$$`, `$!`, `$0`–`$9`, `$@`, `$*`) standing alone are not paths and are ignored. Next to path text (`p$1hi`, `../mnt/p$@hi`) they are wildcards (ruling R27). Their marks survive binding into variables and loop lists and are resolved where the value is used (ruling R29).
+   - Special and positional parameters (`$?`, `$#`, `$$`, `$!`, `$0`–`$9`, `$@`, `$*`) standing alone are not paths and are ignored. Next to path text (`p$1hi`, `../mnt/p$@hi`) they are wildcards (ruling R27). Their marks survive binding into variables and loop lists and are resolved where the value is used (ruling R29). Joined to other text, `$?`, `$#`, `$$`, `$!` and `$-` read as `*`, since zsh's `$?` can be negative; zsh's length form `$#name` and the flag forms `$=name`, `$~name`, `$^name`, `$+name` make the rest of the word a wildcard (rulings R32, R33). A piece made only of such marks, split off at `=`, `:` or `,`, is harmless, so `echo "rc=$?"` stays allowed.
    - **Wildcards.** A variable that cannot be bound to a value, a command substitution (`$(…)` or backticks), or a glob character makes that part of the candidate a wildcard.
    - **Literal substitutions** (rulings R19b–R19e). The one substitution read as literal text is a whole word `"$(cat <<'EOF' … EOF)"` with a quoted delimiter, which is how commit messages and PR bodies are passed. It is literal only when:
      - every program word in the command is exactly `git` or `gh`, running built-in subcommands: no `push`, `fetch` or `pull`, not `gh repo` or `gh gist`, and no `--` after `gh`;
@@ -225,6 +227,13 @@ For writes, the frozen-file guard and validator use the vault that contains the 
    - Redirection targets never name programs, scripts or `cd` targets (fix round 5).
    - `<<<` is a herestring, not a heredoc (ruling R24).
    - `$"…"` is a quoted string (ruling R24).
+   - Inside double quotes, a backslash before `$`, a backquote, `"`, `\` or a newline is removed before nested bodies are parsed, as POSIX does (ruling R33).
+   - A heredoc or herestring fed to a shell program (`sh`, `bash`, `zsh`, `dash`, `ksh`) with no `-c` and no script operand is parsed as a nested command, like a `-c` body. An unquoted heredoc first gets POSIX heredoc unescaping (ruling R34). Other ways of feeding shell code through stdin are a residual risk (ruling R35, section 12).
+
+**Bounds.** Every bound denies; nothing past one is silently unchecked.
+- Bash caps nesting depth, alternatives, resolution bases, candidates, glob matches and distinct path resolutions. The link-exposure walk stops after 20,000 entries.
+- A size bound or a truncated walk gives the message below for calls that cannot be checked safely, not a data-path message (final review item 2). Glob and Grep, recursive Bash commands and inline-code interpreters are refused this way from a folder with more than 20,000 entries.
+- **Deadline** (ruling R37). A pre-tool-use call still running after 60 seconds is denied from a `SIGALRM` handler with the fixed failure message, well under the 120 s hook timeout. This holds on older CLIs, which let a timed-out hook through. Platforms without interval timers have no deadline.
 
 **Grep and Glob tools.**
 - Grep is treated as `rg` (rule 6a, without the ignore exception, since the tool's flags are not visible).
@@ -247,7 +256,7 @@ For writes, the frozen-file guard and validator use the vault that contains the 
 - A vault whose config fails to load allows only the Read tool on its `.labbrain/` files (section 4).
 - The user makes these changes themselves, and the README says so.
 
-**Messages.** For example: `lab-brain data guard: this Bash command refers to protected data path #1 ('<entry as configured>'). Individual-level data must not enter the session. If you need this run, ask the user to run it themselves and share only aggregate results.` A message never includes the command, the candidate path or any file contents.
+**Messages.** For example: `lab-brain data guard: this Bash command refers to protected data path #1 ('<entry as configured>'). Individual-level data must not enter the session. If you need this run, ask the user to run it themselves and share only aggregate results.` When no particular root is implicated (a bound was hit, or the guard cannot judge a form): `lab-brain data guard: this Glob call cannot be checked safely here (too many files to check for links, input too large, or a form the guard cannot read). Narrow the search folder or ask the user to run it.` Unresolved variables and substitutions in Bash keep their own message. A message never includes the command, the candidate path or any file contents.
 
 ## 6. Frozen-file guard
 
@@ -378,15 +387,18 @@ A separate small PR in `lab-brain-template`, as in M4:
 ## 12. Residual risks (documented, not fixed)
 
 - **Code that reads data and prints records** (by design, section 2), and obfuscated paths. The stronger fix is Claude Code's OS-level Bash sandbox with data paths denied for reading. That would also block legitimate training runs, so it is the user's per-project choice. It is noted in the README as an option and not built in M5.
-- **CLI older than 2.1.295:** a PreToolUse hook that times out lets the call proceed. Mitigated by the 120 s timeout and fast hooks, and closed on newer CLIs by `onFailure`.
+- **CLI older than 2.1.295:** a PreToolUse hook that times out lets the call proceed. Mitigated by the 60 s deadline inside the hook (R37), the 120 s timeout and fast hooks, and closed on newer CLIs by `onFailure`. Only a platform without interval timers lacks the deadline.
 - **Hard links** to individual files inside a protected root are not detected, as with the M4 tracker guard.
 - **The plugin must be enabled and `uv` installed.** If `uv` is missing, every tool call in a session with the plugin enabled is blocked. That is loud, but it fails closed.
-- **Bash writes to frozen notes** are caught only at lint or commit.
+- **Writes made through Bash** (`>>`, `sed -i`, `tee` and the like) bypass the frozen-file guard, the PHI pre-scan and the post-write validator. Lint and pre-commit catch them at commit.
+- **Git commands that rewrite the working tree** (`git checkout <rev> -- .`, `git stash`, `git reset`) can change `.labbrain/config.yaml` without naming it.
+- **Shell code fed to a shell through stdin in unusual forms.** The common forms are parsed as nested commands (R34); unusual ones are not (ruling R35). This falls under the deliberate-obfuscation non-goal of section 2.
 - **MCP tools that write vault files** bypass the frozen-file guard, the PHI pre-scan and the post-write validator (ruling R14). Lint and pre-commit catch them at commit.
 - **Percent-encoded or `file://` URL spellings** of a data path are not decoded (ruling R16).
 - **`RIPGREP_CONFIG_PATH`** could add `--follow` to `rg`. The link-exposure walk mitigates it.
 - **`git -C` or `--git-dir` with a pre-written repository config** can run code.
 - **Paths built by concatenation or encoding inside inline code**, when no link into a root sits under the cwd.
+- **Data path names with unusual punctuation.** A relative mention of a root whose name holds punctuation other than `=`, `,` and `:`, glued to other text, may be split before it is resolved.
 
 ## 13. Decided here vs left to the builder
 
@@ -429,10 +441,16 @@ Controller rulings made during the build. The sections above have been updated t
 - **R19a–R19e.** Substitutions are wildcards, except the whole-word quoted `cat` heredoc in pure `git`/`gh` commands (section 5, rule 2). No `echo` or `printf` form is ever literal.
 - **R20, R21, R23.** Glob is a recursive construct with Claude Code's search bases; a pattern with more than 16 literal directories is unsure and denies.
 - **R22.** Every path is judged physically and textually.
-- **R26.** Rule 8's basename check also runs on quote- and backslash-stripped text.
 - **R24.** `<<<` is a herestring, not `<` plus a quoted heredoc (which hid a nested `$(claude)`), and `$"…"` is a quoted string.
+- **R26.** Rule 8's basename check also runs on quote- and backslash-stripped text.
 - **R27.** An assignment-only command with a redirection still binds (a); special and positional parameters next to path text are wildcards (b).
 - **R29.** Special-parameter marks survive binding (for and select lists, assignments, `export`, `declare`, `local`, `readonly`) and are resolved where the value is used: next to path text they are wildcards, alone they are harmless, so `rc=$?; echo $rc` stays allowed.
+- **R32.** Joined special parameters (`$?`, `$#`, `$$`, `$!`, `$-`, braced too) read as `*`; zsh's `$#name` makes the rest of the word a wildcard; alone they stay harmless.
+- **R33.** POSIX backslash removal inside double quotes (a); zsh's unbraced flag forms are wildcards (b); a piece made only of special-parameter marks after splitting at `=`, `:` or `,` is harmless (c, d).
+- **R34.** A heredoc or herestring fed to a shell program with no `-c` and no script operand is parsed as a nested command body.
+- **R35.** Other ways of feeding shell code to a shell through stdin are a documented residual risk (section 12), under the deliberate-obfuscation non-goal.
+- **R36.** The `-c` scan skips redirection targets, and the text after each `=` is a candidate. The final review extended this to `,` and `:`, and to raw text and MCP strings.
+- **R37.** A 60 s deadline on pre-tool-use; suffix building bounded, resolutions memoized and capped; the link walk stops at the first link into a root.
 - **Fix round 5.** Redirections never name programs.
 - **Platform.** CLI 2.1.304 has a Glob tool (section 3).
 - **Frozen policy.** `POLICIES` lives in `labbrain/frozen.py`.

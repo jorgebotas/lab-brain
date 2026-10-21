@@ -16,15 +16,18 @@ All notable changes to this project are documented here. Versions follow semanti
   - guard self-protection: in a protected vault the agent may not change `.labbrain/`,
     `.copier-answers.yml`, `.claude/settings*.json`, the plugin or its caches, run
     `copier`, or start a nested agent CLI;
-  - a frozen-file guard that blocks rewrites of frozen notes, existing `raw/` files and
-    manuscripts outside `_proposals/`, using lint's `frozen-edit` comparison against git
-    `HEAD`;
-  - a PHI scan of the proposed content before a write in a protected vault, and
-    `validate_path` after each write, with errors shown to the agent;
+  - a frozen-file guard that blocks file-tool rewrites of frozen notes, existing `raw/`
+    files and manuscripts outside `_proposals/`, using lint's `frozen-edit` comparison
+    against git `HEAD`;
+  - a PHI scan of the proposed content before a Write, Edit, MultiEdit or NotebookEdit in a
+    protected vault, and `validate_path` after each, with errors shown to the agent. Writes
+    made through Bash or MCP tools are not checked by the hooks (lint and pre-commit catch
+    them);
   - a session brief: `index.md` is regenerated and `brief --short` is added to the session
     context.
-- The pre-tool-use hook fails closed: bad input, an engine failure, a missing `uv` or a
-  broken vault config all block the call. No hook ever emits an `allow` decision.
+- The pre-tool-use hook fails closed: bad input, an engine failure, a missing `uv`, a broken
+  vault config or a check still running after 60 seconds all block the call. No hook ever
+  emits an `allow` decision.
 - Integration tests through the hook entry point, a warm-latency budget, the opt-in hooks
   smoke tests and `scripts/m5-gate.sh`.
 

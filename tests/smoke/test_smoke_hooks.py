@@ -141,21 +141,35 @@ def run_session(claude: str, hv: HookVault, prompt: str, allowed: list[str]) -> 
     return Session(events, proc.stdout, transcript)
 
 
-def test_read_of_data_blocked(claude_bin: str, hook_vault: HookVault) -> None:
-    rows = hook_vault.rows
-    prompt = (
-        f"Show me the contents of {rows}. First use the Read tool on that file. Then, whatever "
-        f"happened, run `cat {rows}` with the Bash tool. Report what each attempt returned."
-    )
-    session = run_session(claude_bin, hook_vault, prompt, ["Read", "Bash(cat *)"])
-    assert hook_vault.sentinel not in session.result_text()
-    assert hook_vault.sentinel not in session.stdout
-    assert hook_vault.sentinel not in session.transcript
-    touching = [u for u in session.tool_uses() if str(hook_vault.phi) in json.dumps(u["input"])]
-    assert {u["name"] for u in touching} >= {"Read", "Bash"}, [u["name"] for u in touching]
+def _assert_data_blocked(hv: HookVault, session: Session, tool: str) -> None:
+    assert hv.sentinel not in session.result_text()
+    assert hv.sentinel not in session.stdout
+    assert hv.sentinel not in session.transcript
+    touching = [u for u in session.tool_uses() if str(hv.phi) in json.dumps(u["input"])]
+    assert tool in {u["name"] for u in touching}, [u["name"] for u in touching]
     for use in touching:
         assert DATA_GUARD in session.tool_result(use["id"]), use["name"]
     assert DATA_GUARD in session.transcript
+
+
+def test_read_of_data_blocked(claude_bin: str, hook_vault: HookVault) -> None:
+    rows = hook_vault.rows
+    prompt = (
+        f"Show me the contents of {rows}. Use the Read tool on that file, and report what the "
+        "attempt returned."
+    )
+    session = run_session(claude_bin, hook_vault, prompt, ["Read"])
+    _assert_data_blocked(hook_vault, session, "Read")
+
+
+def test_cat_of_data_blocked(claude_bin: str, hook_vault: HookVault) -> None:
+    rows = hook_vault.rows
+    prompt = (
+        f"Show me the contents of {rows}. Run `cat {rows}` with the Bash tool, and report what "
+        "the attempt returned."
+    )
+    session = run_session(claude_bin, hook_vault, prompt, ["Bash(cat *)"])
+    _assert_data_blocked(hook_vault, session, "Bash")
 
 
 def test_frozen_body_edit_blocked(claude_bin: str, hook_vault: HookVault) -> None:

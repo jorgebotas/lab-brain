@@ -3,7 +3,7 @@ id: ADR-20261015-frozen-edit-semantics
 type: decision
 title: "frozen-edit semantics"
 created: 2026-10-15
-updated: 2026-10-15
+updated: 2026-10-20
 author: claude
 status: accepted
 tags: [engine, lint]
@@ -11,7 +11,7 @@ links: []
 ---
 ## For future agents
 
-Defines exactly what may change in a frozen note; the per-type table is in frozen_rules.py.
+Defines exactly what may change in a frozen note; the per-type table is in labbrain/frozen.py.
 Check POLICIES there before changing which statuses freeze a note.
 
 ## Context
@@ -31,3 +31,5 @@ Frontmatter-only checks, which let Results tables be rewritten; a total freeze, 
 ## Consequences
 
 Typo fixes in frozen notes require supersession. A git command that fails after the repository was opened (for example a corrupt object store) blocks the commit rather than passing it silently. Covers spec ADR item 5.
+
+**2026-10-20:** `POLICIES` and the comparison moved from `frozen_rules.py` to `labbrain/frozen.py`, which the lint rule and the M5 frozen-file guard both use. The semantics are unchanged.

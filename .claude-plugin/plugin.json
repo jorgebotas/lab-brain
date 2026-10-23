@@ -1,7 +1,7 @@
 {
   "name": "lab-brain",
-  "version": "0.2.0",
-  "description": "Skills for lab-brain research vaults: capture ideas, log experiments, record decisions, hand off sessions.",
+  "version": "0.3.0",
+  "description": "Skills and guardrail hooks for lab-brain research vaults: capture ideas, log experiments, record decisions, hand off sessions, and keep protected data and frozen notes safe.",
   "author": { "name": "jorgebotas" },
   "repository": "https://github.com/jorgebotas/lab-brain",
   "license": "MIT"

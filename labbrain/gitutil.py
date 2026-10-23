@@ -11,6 +11,10 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+# Final review item 9: what the hooks add to every git command they run, so a repository's
+# own config cannot make a guard check start a program (an fsmonitor) or a git hook.
+HOOK_GIT_OPTIONS: tuple[str, ...] = ("-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null")
+
 
 class GitError(Exception):
     """A git command failed. `returncode` is git's exit status, None if git did not run."""
@@ -24,12 +28,12 @@ class GitError(Exception):
 class Repo:
     top: Path
     prefix: str  # vault directory inside the repo, POSIX; "" when the vault is the repo root
+    options: tuple[str, ...] = ()  # global git options before every command (hooks only)
 
     def git(self, *args: str, input: bytes | None = None) -> bytes:
+        argv = ["git", *self.options, "-C", str(self.top), *args]
         try:
-            proc = subprocess.run(
-                ["git", "-C", str(self.top), *args], input=input, capture_output=True, check=True
-            )
+            proc = subprocess.run(argv, input=input, capture_output=True, check=True)
         except subprocess.CalledProcessError as exc:
             raise GitError(f"git {args[0]} failed", exc.returncode) from exc
         except OSError as exc:
@@ -47,11 +51,21 @@ class Repo:
         return repo_rel[len(head) :] if repo_rel.startswith(head) else None
 
 
-def open_repo(vault_root: Path) -> Repo | None:
-    """Both the toplevel and the prefix come from git, so a mis-cased path is canonicalised."""
+def open_repo(vault_root: Path, *, hook: bool = False) -> Repo | None:
+    """Both the toplevel and the prefix come from git, so a mis-cased path is canonicalised.
+    With `hook`, this and every later command of the repo run with HOOK_GIT_OPTIONS."""
+    options = HOOK_GIT_OPTIONS if hook else ()
     try:
         out = subprocess.run(
-            ["git", "-C", str(vault_root), "rev-parse", "--show-toplevel", "--show-prefix"],
+            [
+                "git",
+                *options,
+                "-C",
+                str(vault_root),
+                "rev-parse",
+                "--show-toplevel",
+                "--show-prefix",
+            ],
             capture_output=True,
             text=True,
             check=True,
@@ -62,7 +76,7 @@ def open_repo(vault_root: Path) -> Repo | None:
     if not lines[0]:
         return None
     prefix = lines[1].rstrip("/") if len(lines) > 1 else ""
-    return Repo(Path(lines[0]).resolve(), prefix)
+    return Repo(Path(lines[0]).resolve(), prefix, options)
 
 
 def resolve_ref(repo: Repo, ref: str) -> str | None:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import subprocess
 from datetime import date
@@ -85,3 +87,44 @@ def commit_all(cwd: Path, message: str = "fixture") -> None:
 def copy_fixture(dest: Path) -> Path:
     shutil.copytree(FIXTURE, dest)
     return dest
+
+
+HOOK_FIXTURES = Path(__file__).parent / "fixtures" / "hooks"
+_HOOK_OVERRIDES = ("tool_input", "tool_name")
+
+
+def _substitute(value: Any, subs: dict[str, str]) -> Any:
+    if isinstance(value, str):
+        for key, text in subs.items():
+            value = value.replace("{" + key + "}", text)
+        return value
+    if isinstance(value, dict):
+        return {k: _substitute(v, subs) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_substitute(v, subs) for v in value]
+    return value
+
+
+def hook_payload(name: str, **subs: Any) -> bytes:
+    """A recorded hook payload from tests/fixtures/hooks/<name>.json, as stdin bytes.
+
+    Each `{key}` placeholder (cwd, path, command, content, old, new, source) in any string
+    is replaced by str(value); placeholders not given stay literal. `tool_input=` and
+    `tool_name=` replace those top-level fields after substitution.
+    """
+    overrides = {key: subs.pop(key) for key in _HOOK_OVERRIDES if key in subs}
+    data = json.loads((HOOK_FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
+    data = _substitute(data, {key: str(value) for key, value in subs.items()})
+    data.update(overrides)
+    return json.dumps(data, ensure_ascii=False).encode("utf-8")
+
+
+# The environment variables that select a vault or a guard tree for a hook call.
+HOOK_ENV_KEYS = ("CLAUDE_PROJECT_DIR", "LABBRAIN_VAULT", "CLAUDE_PLUGIN_ROOT", "UV_CACHE_DIR")
+
+
+def clean_env(**extra: str) -> dict[str, str]:
+    """This process's environment without HOOK_ENV_KEYS, plus `extra`."""
+    env = {k: v for k, v in os.environ.items() if k not in HOOK_ENV_KEYS}
+    env.update(extra)
+    return env

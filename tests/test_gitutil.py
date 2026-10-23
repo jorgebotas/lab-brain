@@ -31,6 +31,36 @@ def test_open_repo_reports_prefix(tmp_path: Path) -> None:
     assert gitutil.open_repo(tmp_path) is None
 
 
+def record_git(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """Every argv `gitutil` runs, recorded; the commands still run."""
+    calls: list[list[str]] = []
+    real = subprocess.run
+
+    def run(argv: list[str], *args: object, **kwargs: object) -> object:
+        calls.append(list(argv))
+        return real(argv, *args, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(gitutil.subprocess, "run", run)
+    return calls
+
+
+def test_hook_options_only_when_asked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Final review item 9: hook paths disable fsmonitor and git hooks; lint and the CLI
+    keep plain git."""
+    assert gitutil.HOOK_GIT_OPTIONS == ("-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null")
+    repo_dir = make_repo(tmp_path)
+    calls = record_git(monkeypatch)
+    plain = gitutil.open_repo(repo_dir / "brain")
+    assert plain is not None and gitutil.resolve_ref(plain, "HEAD") is not None
+    assert calls and all("core.fsmonitor=" not in argv for argv in calls)
+    calls.clear()
+    hooked = gitutil.open_repo(repo_dir / "brain", hook=True)
+    assert hooked is not None and gitutil.resolve_ref(hooked, "HEAD") is not None
+    gitutil.read_blobs(hooked, gitutil.ls_tree(hooked, "HEAD").values())
+    assert len(calls) == 4
+    assert all(argv[1:5] == list(gitutil.HOOK_GIT_OPTIONS) for argv in calls)
+
+
 def test_changed_files_tree_and_blobs_are_vault_relative(tmp_path: Path) -> None:
     repo_dir = make_repo(tmp_path)
     repo = gitutil.open_repo(repo_dir / "brain")

@@ -1,0 +1,8 @@
+{
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "transcript_path": "/tmp/labbrain-fixture/transcript.jsonl",
+  "cwd": "{cwd}",
+  "hook_event_name": "SessionStart",
+  "scratchpad_dir": "/tmp/labbrain-fixture/scratchpad",
+  "source": "{source}"
+}

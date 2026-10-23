@@ -2,6 +2,48 @@
 
 All notable changes to this project are documented here. Versions follow semantic versioning.
 
+## 0.3.0 (2026-10-22)
+
+### Added
+
+- Claude Code hooks, shipped in the plugin (`hooks/hooks.json`) and run through
+  `labbrain hook pre-tool-use | post-tool-use | session-start`:
+  - a data guard that blocks any tool call that names a protected data path, or searches
+    into one, through Read, Write, Edit, Glob, Grep, MCP tools and Bash (direct paths, `~`,
+    `$HOME`, variables, `..`, symlinks, case, globs, `cd`, recursive searches, literal paths
+    inside inline code). It judges what the call names, not what a program opens: see the
+    README's known gaps;
+  - guard self-protection: in a protected vault the agent may not change `.labbrain/`,
+    `.copier-answers.yml`, `.claude/settings*.json`, the plugin or its caches, run
+    `copier`, or start a nested agent CLI;
+  - a frozen-file guard that blocks file-tool rewrites of frozen notes, existing `raw/`
+    files and manuscripts outside `_proposals/`, using lint's `frozen-edit` comparison
+    against git `HEAD`;
+  - a PHI scan of the proposed content before a Write, Edit, MultiEdit or NotebookEdit in a
+    protected vault, and `validate_path` after each, with errors shown to the agent. Writes
+    made through Bash or MCP tools are not checked by the hooks (lint and pre-commit catch
+    them);
+  - a session brief: `index.md` is regenerated and `brief --short` is added to the session
+    context.
+- The pre-tool-use hook fails closed: bad input, an engine failure, a missing `uv`, a broken
+  vault config or a check still running after 60 seconds all block the call. No hook ever
+  emits an `allow` decision.
+- Integration tests through the hook entry point, a warm-latency budget, the opt-in hooks
+  smoke tests and `scripts/m5-gate.sh`.
+
+### Changed
+
+- The frozen-note policy table and comparison moved from the lint rule to
+  `labbrain/frozen.py`, shared by lint and the frozen-file guard.
+- `brief` passes note titles through `findings.sanitize`, because the short brief now feeds
+  the session context.
+
+### Upgrading from 0.2.0
+
+- Update the plugin (`claude plugin update lab-brain@lab-brain`). The hooks need `uv` on
+  `PATH`; without it every tool call in a session with the plugin enabled is blocked.
+- Claude Code 2.1.295 or later is recommended, so a hook that times out also blocks.
+
 ## 0.2.0 (2026-10-20)
 
 ### Added

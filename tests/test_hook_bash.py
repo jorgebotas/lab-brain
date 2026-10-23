@@ -877,6 +877,11 @@ def test_truncated_walk_denies_any_recursion(
     w = make_bash_world(tmp_path, monkeypatch)
     w.env.pop("CLAUDE_PLUGIN_DATA")
     monkeypatch.setattr("labbrain.hooks.exposure.WALK_LIMIT", 3)
+    # The walk stops at the first link into a root, and `os.scandir` order is the
+    # filesystem's (hashed on ext4): with `data` or `mnt` listed early it would end found,
+    # not truncated. Without them the walk can only truncate, in any order.
+    (w.repo / "data").unlink()
+    (w.repo / "mnt").unlink()
     for n in range(5):
         (w.repo / f"f{n}.txt").write_text("")
     # Final review item 2: the accurate message, not the unresolved-variable one.
@@ -1015,6 +1020,17 @@ def test_equals_words_and_many_bases_deny_fast(
         began = time.perf_counter()
         assert w.check(command, scope) is not None, command[:40]
         assert time.perf_counter() - began < 5.0, command[:40]
+
+
+def test_repeated_runs_still_spend_the_suffix_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A raw run repeated in the text is checked once, but each repeat still spends the
+    suffix text it builds, so a long run repeated past the budget is still too large."""
+    w = make_bash_world(tmp_path, monkeypatch)
+    repeated = "true # " + ("a=" * 2000 + "/x ") * 20  # a comment: raw text only
+    assert w.check(repeated) == unchecked_denial("this Bash command")
+    assert w.check("echo 'a=b/x a=b/x a=b/x'") is None
 
 
 def test_many_bases_deny_fast(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

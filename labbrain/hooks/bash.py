@@ -361,11 +361,24 @@ LITERAL_GH_SUBCOMMANDS: frozenset[str] = frozenset(
 )
 LITERAL_GIT_UNSAFE: tuple[str, ...] = ("-c", "--config-env", "--exec-path")
 # Raw-text runs are `paths.path_runs`; R17's sticky split is `paths.sticky_pieces`.
-_GLOB_CHARS = set("*?[")
+_GLOB_CHARS = frozenset("*?[")
+
+
+def _has_glob(text: str) -> bool:
+    """Whether `text` holds a glob character; a set test in C, since candidates can be
+    thousands of characters long and there can be thousands of them."""
+    return not _GLOB_CHARS.isdisjoint(text)
+
+
 _PIECE_SPLIT = re.compile(r"[=:,]")
 _GLUED_OPTION = re.compile(r"-[A-Za-z]+(?=[/~.])")
 _COMMENT_START = set(" \t\n;&|()")
 _SCAN_STOP = re.compile(r"[\\'\"$`#<\n()]")  # where the pre-pass has something to do
+# A run of plain `$NAME` references and the text up to the next stop: what the pre-pass
+# would mark one reference at a time, marked in one substitution (`$X/` repeated).
+_NAME_RUN = re.compile(r"(?:\$[A-Za-z_][A-Za-z0-9_]*[^\\'\"$`#<\n()]*)+")
+_DQUOTE_NAME_RUN = re.compile(r'(?:\$[A-Za-z_][A-Za-z0-9_]*[^\\"$`]*)+')
+_NAME_REF = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
 _DQUOTE_STOP = re.compile(r'[\\"$`]')
 _BODY_STOP = re.compile(r"[\\$`]")
 _HEREDOC_ESCAPE = re.compile(r"\\([$`\\\n])")  # R34: what an unquoted heredoc unescapes
@@ -611,6 +624,11 @@ def _heredoc_bodies(
     return i
 
 
+def _mark_names(run: str) -> str:
+    """`run` with each `$NAME` marked as `_expansion` marks it."""
+    return _NAME_REF.sub(lambda m: _VAR + m.group(1) + _END, run)
+
+
 def _scan(text: str, i: int = 0, closer: str | None = None) -> _Scanned:
     """The quote-aware pre-pass over `text` from `i`, up to an unmatched `closer`."""
     scanned = _Scanned("", [], [], True, len(text))
@@ -664,6 +682,9 @@ def _scan(text: str, i: int = 0, closer: str | None = None) -> _Scanned:
                     elif escaped != "\n":
                         out.append(text[i : i + 2])  # shlex itself unescapes \" and \\
                     i += 2
+                elif d == "$" and (run := _DQUOTE_NAME_RUN.match(text, i)) is not None:
+                    out.append(_mark_names(run.group()))
+                    i = run.end()
                 elif d == "`" or (d == "$" and text[i + 1 : i + 2] != '"'):
                     i, closed = _expansion(text, i, out, scanned, at_word_start and i == opened)
                     scanned.ok = scanned.ok and closed
@@ -675,6 +696,9 @@ def _scan(text: str, i: int = 0, closer: str | None = None) -> _Scanned:
                 i += 1
             else:
                 scanned.ok = False
+        elif c == "$" and (run := _NAME_RUN.match(text, i)) is not None:
+            out.append(_mark_names(run.group()))
+            i = run.end()
         elif c in "$`":
             i, closed = _expansion(text, i, out, scanned)
             scanned.ok = scanned.ok and closed
@@ -1304,7 +1328,9 @@ class _Check:
         for whole in _braces(text):
             yield self._tilde(_short(whole, True)), True
             pieces = _PIECE_SPLIT.split(whole)
-            for piece in pieces[1:] if len(pieces) > 1 else ():
+            # An empty piece reads as nothing; skipping them in C keeps a run of a million
+            # `=` from costing a million Python iterations.
+            for piece in filter(None, pieces[1:]):
                 yield self._tilde(_short(piece, False)), False
             # The text after each `=`, `,` or `:` (R36; `,` and `:` from final review item 3).
             # Item 1(a): only suffixes within SUFFIX_LIMIT are built, since a longer one
@@ -1344,10 +1370,18 @@ class _Check:
                         if piece:
                             self._add(_Candidate(piece, s, w, whole))
         exempt_runs = sum(len(simple.exempt) for simple in self.simples)
+        repeatable = not exempt_runs
         for body, bindings in self.raw:
+            # A run seen before in this body adds only candidates `_add` already holds, so
+            # it is skipped; it still spends the suffix text it built the first time.
+            spent: dict[str, int] = {}
             # R36, final review item 3: runs that `=` and `,` would cut, whole; `_pieces`
             # adds the text after each mark.
             for run in itertools.chain(path_runs(body), loose_runs(body)):
+                if repeatable and run in spent:
+                    self.budget.spend(spent[run])
+                    continue
+                before = self.budget.left
                 for alternative in map(_params, self._expand(run, bindings)):
                     for piece, whole in self._pieces(alternative):
                         if not piece:
@@ -1356,6 +1390,7 @@ class _Check:
                             exempt_runs -= 1  # the raw spelling of an exempt `--from` value
                             continue
                         self._add(_Candidate(piece, None, None, whole))
+                spent[run] = before - self.budget.left
 
     def _is_plugin_root(self, text: str) -> bool:
         if self.plugin_root is None or WILD in text or not text.startswith("/"):
@@ -1397,7 +1432,7 @@ class _Check:
                     continue
                 for base in [*self.bases, *(Path(p) for p in cdpath)]:
                     place = self._absolute(target, base)
-                    if WILD in place or any(c in _GLOB_CHARS for c in place):
+                    if WILD in place or _has_glob(place):
                         pattern = place.replace(WILD, "*")
                         for match in itertools.islice(glob.iglob(pattern), MAX_BASES + 1):
                             for reading in self._read(match, base):
@@ -1408,7 +1443,7 @@ class _Check:
             for candidate in self.candidates:
                 if not candidate.whole or WILD in candidate.text:
                     continue
-                if any(c in _GLOB_CHARS for c in candidate.text):
+                if _has_glob(candidate.text):
                     continue
                 for base in list(self.bases):
                     for path in self._read(candidate.text, base):
@@ -1457,7 +1492,7 @@ class _Check:
                 return guard
         for candidate in self.candidates:  # a glob inside a guard tree, even with no match
             text = candidate.text
-            if WILD in text or not any(c in _GLOB_CHARS for c in text):
+            if WILD in text or not _has_glob(text):
                 continue
             bases = [Path("/")] if text.startswith("/") else self.bases
             for base in bases:
@@ -1477,7 +1512,7 @@ class _Check:
             text = candidate.text
             if WILD in text:
                 continue
-            if any(c in _GLOB_CHARS for c in text):
+            if _has_glob(text):
                 for match in self._glob(candidate):
                     yield candidate, match
                 continue
@@ -1563,7 +1598,7 @@ class _Check:
         """Rule 5: a glob or wildcard whose literal prefix is inside or above a root."""
         for candidate in self.candidates:
             text = candidate.text
-            if WILD not in text and not any(c in _GLOB_CHARS for c in text):
+            if WILD not in text and not _has_glob(text):
                 continue
             bases = [Path("/")] if text.startswith("/") else self.bases
             for base in bases:
@@ -1659,7 +1694,7 @@ class _Check:
                 continue
             if WILD in candidate.text:
                 continue
-            if any(c in _GLOB_CHARS for c in candidate.text):
+            if _has_glob(candidate.text):
                 paths = self._glob(candidate)
             else:
                 paths = self.resolved(candidate)
@@ -1821,7 +1856,7 @@ def _split_pattern(pattern: str) -> tuple[str, list[str]]:
     """(literal prefix, remaining components) of an absolute pattern."""
     parts = pattern.split("/")
     for k, part in enumerate(parts):
-        if WILD in part or any(c in _GLOB_CHARS for c in part):
+        if WILD in part or _has_glob(part):
             return "/".join(parts[:k]) or "/", parts[k:]
     return pattern, []
 

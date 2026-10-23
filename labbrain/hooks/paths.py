@@ -15,8 +15,10 @@ elsewhere: rewriting or removing it changes that tree.
 
 from __future__ import annotations
 
+import errno
 import os
 import re
+import stat
 import unicodedata
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
@@ -69,11 +71,24 @@ def spellings(p: Path | str, base: Path | None = None) -> tuple[Path, ...]:
     the link itself. Errors propagate as for `canonical`.
     """
     path = _joined(p, base)
-    full = path.resolve(strict=False)
     if path.name in ("", ".", ".."):
-        return (full,)
+        return (path.resolve(strict=False),)
     own = path.parent.resolve(strict=False) / path.name
+    # Resolving `path` resolves its parent, then looks at the last component: unless that
+    # is a link, the canonical spelling is `own`, and a second full resolution is saved.
+    if not _is_link(own):
+        return (own,)
+    full = path.resolve(strict=False)
     return (full,) if own == full else (full, own)
+
+
+def _is_link(path: Path) -> bool:
+    """Whether `path` itself is a symlink; a path that cannot be looked at is not one, as
+    for `os.path.realpath`."""
+    try:
+        return stat.S_ISLNK(os.lstat(path).st_mode)
+    except OSError:
+        return False
 
 
 # Path candidates in free text, shared by Bash rule 1 and the generic tool walk: runs free
@@ -178,6 +193,41 @@ def _identity(path: Path | str) -> tuple[int, int] | None:
     return (st.st_dev, st.st_ino)
 
 
+# Errors of looking up P that every path below P fails with too.
+_ABSENT = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ENAMETOOLONG})
+
+
+def _absent(path: Path) -> bool:
+    """Whether `path` cannot be looked up, so that nothing below it can be either."""
+    try:
+        os.lstat(path)
+    except OSError as error:
+        return error.errno in _ABSENT
+    except ValueError:
+        return True  # a NUL byte: every path below holds it too
+    return False
+
+
+def _identities(path: Path) -> list[tuple[int, int]]:
+    """The `_identity` of `path`'s ancestors and of `path`, from the top down. Below one
+    that is absent, no deeper one is looked at (a long candidate has many parts, and a
+    command can have thousands of candidates)."""
+    found: list[tuple[int, int]] = []
+    for part in (*reversed(path.parents), path):
+        identity = _identity(part)
+        if identity is not None:
+            found.append(identity)
+        elif _absent(part):
+            break
+    return found
+
+
+def _below_or_at(candidate: Path, path: Path) -> bool:
+    """`candidate == path or path in candidate.parents`, for absolute paths, by text."""
+    c, r = str(candidate), str(path)
+    return c == r or c.startswith(r if r.endswith(os.sep) else r + os.sep)
+
+
 def _within(key: str, root_key: str) -> bool:
     """Whether folded `key` equals folded `root_key` or lies below it."""
     return key == root_key or key.startswith(root_key.rstrip(os.sep) + os.sep)
@@ -233,7 +283,7 @@ class Targets:
         for candidate in names:
             for root in self.roots:
                 for path in (root.path, root.link):
-                    if path is not None and (candidate == path or path in candidate.parents):
+                    if path is not None and _below_or_at(candidate, path):
                         return root
         for key in map(fold, names):
             for root_key, root in self._folded:
@@ -241,9 +291,8 @@ class Targets:
                     return root
         if self._ids:
             candidate = names[0]  # stat follows links: the own spelling has the same identity
-            for part in (candidate, *candidate.parents):
-                identity = _identity(part)
-                if identity is not None and identity in self._ids:
+            for identity in reversed(_identities(candidate)):  # the deepest first
+                if identity in self._ids:
                     return self._ids[identity]
         return None
 
